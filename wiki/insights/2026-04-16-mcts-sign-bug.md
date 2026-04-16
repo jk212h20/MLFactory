@@ -35,14 +35,22 @@ A sign bug in `mcts.py::_rollout`. Two code paths returned a value for "reward f
 
 `node.to_play_at_entry == node.state.to_play` = the player who will move *from* this node. The **mover-into-node** is the OTHER player: `1 - node.to_play_at_entry`. The correct formula is `1.0 if state.winner == (1 - node.to_play_at_entry) else -1.0` — equivalently, `state.winner != node.to_play_at_entry`.
 
-## Why Connect 4 "worked" anyway
-Three reasons the inverted sign still produced an MCTS that beat Random on Connect 4:
+## Why Connect 4 "worked" anyway — the honest story
 
-1. **Short games**: many rollouts from a Connect 4 position reach terminal within a few ply. The immediate-terminal branch was correct, so a non-trivial fraction of simulations were correctly scored.
-2. **First-move bias**: the initial expansion of each root child is scored by a single rollout; with enough sims the noise averages out but the systematic inversion acts like a mild handicap, not a catastrophe.
-3. **Simulation volume saves you**: Connect 4's branching factor of 7 means 200–800 sims adequately explore the tree even with noisy targets.
+I initially hypothesised "short games let the correct terminal-branch fire often enough." That was **wrong**. Instrumentation showed 100% of MCTS iterations on both Connect 4 and Boop take the random-playout branch. The terminal-entry branch essentially never fires (it would require selection+expansion to land on a state that was already terminal, which our tree doesn't add as children).
 
-The sign bug was effectively a *soft handicap* on Connect 4. Post-fix numbers tell the real story:
+So both games were subject to the inverted sign in 100% of their rollouts. Why did Connect 4 still reach 92.5% vs Random while Boop went 0-20?
+
+I genuinely don't have a clean answer. Some factors that likely contribute:
+
+1. **Final move selection is by visit count, not value** (`max(root.children, key=lambda n: (n.visits, n.mean_value))` — "robust child"). Visit counts reflect where UCT focused search, and UCB's exploration term can make UCT visit the "correct" node often even when exploitation points the wrong way. Visit counts are a partial fix.
+2. **UCB exploration pushes visits onto under-visited children regardless of value sign**. The exploration term dominates when visit counts differ widely, so even inverted exploitation doesn't fully prevent balanced exploration early on.
+3. **Opponent modelling via symmetry**: in zero-sum games, "pick the best move for me" and "pick the worst move for opponent" are equivalent. With inverted values, UCT at root picks what it thinks is opponent-best = me-worst; but deeper in the tree, the opponent's errors may partially cancel.
+4. **Boop's long games + larger branching factor** mean UCT has many more levels of potential sign-inconsistency to corrupt, and the sparse-reward signal from 57-move rollouts compounds the error.
+
+The honest summary: **an inverted exploitation term in UCT is a real bug that degrades strength substantially, but "robust child" final selection plus UCB exploration partially mask it. The degree of masking is game-dependent and hard to predict from first principles.**
+
+Post-fix numbers (what good MCTS actually looks like):
 
 | Agent | ELO (buggy MCTS) | ELO (fixed MCTS) |
 |-------|:---:|:---:|
@@ -54,7 +62,9 @@ The sign bug was effectively a *soft handicap* on Connect 4. Post-fix numbers te
 The fix added **~500–650 ELO per MCTS agent** across the board. MCTS(50) was "statistically indistinguishable from random" with the bug; with the fix, it beats Random 39-1 (97.5%). Phase 1's "MCTS(50) ≈ Random" insight has to be retracted — that was a bug, not a noise floor.
 
 ## Why Boop exposed the bug
-Boop games average 57 moves (vs Connect 4's 10-20 before first tactical resolution) and have branching factor ~36 early, ~30 mid-game. Rollouts are long. The terminal-branch (correct) accounts for a much smaller fraction of MCTS samples. The inverted-random-rollout (incorrect) dominates. UCT then systematically picks the **worst** move at the root — which is why MCTS lost to random.
+Boop games average 57 moves and have branching factor ~36 early, ~30 mid-game (vs Connect 4's ~7). Long rollouts + wider trees = more compounding of the sign error. The "robust child" mitigation that partly saved Connect 4 couldn't save Boop. Exact mechanism is not fully understood; what matters is the empirical signature: inverted UCT breaks badly on long-game, high-branching-factor settings.
+
+**One hypothesis worth noting (from the user)**: could the bug be game-specific via the "win on opponent's turn" rule? In Boop, gray's placement could theoretically boop orange's cats into a winning configuration, but the TS (and our port) only check win for the mover. So that rule doesn't actually trigger during normal play. I confirmed the bug is NOT about this — it's a pure sign inversion that affects all games. But the observation is worth recording: **games where wins can happen on the "wrong" player's turn would have additional perspective subtleties we'd need to handle**. That's a future consideration, not what happened here.
 
 ## Lesson for Phase 3
 When a change "works" but "doesn't work as well as expected," suspect a silent sign / perspective bug. We will:
@@ -63,6 +73,8 @@ When a change "works" but "doesn't work as well as expected," suspect a silent s
 2. **Sanity-check obvious wins**: MCTS must find a 1-move win 100% of the time at modest sim budget. We now have this test for Boop and Connect 4.
 3. **Record expected ranges**: MCTS(N) vs Random should scale roughly log(N) ELO. If the first few data points plateau, something is broken.
 4. **Distrust large-margin "success" results on simple games**: 97% vs Random on Connect 4 seemed strong; post-fix it's 100% with MCTS(200). A 3% margin was the bug's thumbprint.
+5. **Robust child is a real safety net**: final move selection by visit count (not value) partially masks value-sign bugs. Don't let that mask hide real bugs. Cross-check visit distributions against raw rollout statistics periodically.
+6. **Games where wins can occur on either player's turn** need extra care. Boop could (in theory, via cat-boops-cat rearrangements) let gray's placement create a winning line for orange, though the existing TS rule only checks win for the mover so this is ignored. If we ever add a game where off-turn wins matter, the MCTS sign convention must be re-audited.
 
 ## Reproduction recipe
 - Bad commit: `153dedf` (Phase 1). `uv run mlfactory tournament --game connect4 --agents random,mcts50,mcts200,mcts800 --games-per-match 40 --seed 0` shows mcts50 at 1510 ELO.
