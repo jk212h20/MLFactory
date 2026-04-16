@@ -595,7 +595,8 @@ def _eval_pair(
     iter_index: int,
     layout: RunLayout,
 ) -> None:
-    result = play_match(env, a, b, n_games=n_games)
+    result = play_match(env, a, b, n_games=n_games, should_stop=_is_stop_requested)
+    total = result.a_wins + result.b_wins + result.draws
     write_event(
         layout.events_path,
         "eval",
@@ -604,8 +605,13 @@ def _eval_pair(
         wins=int(result.a_wins),
         losses=int(result.b_wins),
         draws=int(result.draws),
-        score=round(result.a_wins / max(result.a_wins + result.b_wins + result.draws, 1), 3),
+        games=total,  # may be < n_games if stop requested mid-match
+        score=round(result.a_wins / max(total, 1), 3),
     )
+
+
+def _is_stop_requested() -> bool:
+    return _stop_requested
 
 
 if __name__ == "__main__":

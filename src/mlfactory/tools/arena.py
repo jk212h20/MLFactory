@@ -110,14 +110,24 @@ def play_match(
     n_games: int = 100,
     swap_colours: bool = True,
     progress: bool = False,
+    should_stop: "callable | None" = None,  # type: ignore[valid-type]
 ) -> PairwiseResult:
     """Play n_games between A and B. Colour-balanced by default.
 
     If n_games is odd, the extra game goes to A-as-player-0.
+
+    Parameters
+    ----------
+    should_stop
+        Optional callable `() -> bool`. Checked between games; if it ever
+        returns True, the match aborts early and returns partial results.
+        Used by the trainer to make eval interruptible by SIGTERM.
     """
     result = PairwiseResult(agent_a_name=agent_a.name, agent_b_name=agent_b.name)
     games = []
     for i in range(n_games):
+        if should_stop is not None and should_stop():
+            break
         a_is_player_0 = (i % 2 == 0) if swap_colours else True
         if a_is_player_0:
             winner, moves = play_game(env, agent_a, agent_b)

@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# notify-on-done: watch an MLFactory run and trigger a notification + optional
+# session wake-up when it finishes.
+#
+# Usage:
+#   scripts/notify-on-done <run-id> [--session <id-or-substring>] [options]
+#
+# What it does, in order, when the run's status becomes non-"running":
+#   1. macOS notification (osascript).
+#   2. Terminal bell (\a).
+#   3. (optional) `poke-session <session> "<message>"` to wake a dormant
+#      OpenCode conversation with a summary of the finished run.
+#
+# Options:
+#   --session <id-or-substring>   Session to poke when the run ends.
+#   --message <text>              Custom wake-up message (default: an
+#                                 auto-built summary).
+#   --game <name>                 Default: boop.
+#   --interval <seconds>          Poll interval (default: 10).
+#   --quiet                       Don't print progress heartbeats.
+#   --no-notify                   Skip the macOS notification.
+#   --no-bell                     Skip the terminal bell.
+#   --dry-run                     Don't actually poke; print what would happen.
+#
+# Blocks in the foreground until done. Run it in a separate terminal or
+# background with `&`.
+#
+# Example:
+#   scripts/notify-on-done 2026-04-16-190335-smoke-pre \
+#       --session "MLFactory conversation review"
+
+set -euo pipefail
+
+prog=$(basename "$0")
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+
+game="boop"
+session=""
+message=""
+interval=10
+quiet=0
+no_notify=0
+no_bell=0
+dry=0
+run_id=""
+
+die() { echo "$prog: $*" >&2; exit 1; }
+
+usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --session) session="$2"; shift 2 ;;
+    --message) message="$2"; shift 2 ;;
+    --game) game="$2"; shift 2 ;;
+    --interval) interval="$2"; shift 2 ;;
+    --quiet) quiet=1; shift ;;
+    --no-notify) no_notify=1; shift ;;
+    --no-bell) no_bell=1; shift ;;
+    --dry-run) dry=1; shift ;;
+    -*) die "unknown flag: $1 (try --help)" ;;
+    *)
+      if [ -z "$run_id" ]; then
+        run_id="$1"; shift
+      else
+        die "unexpected positional: $1"
+      fi
+      ;;
+  esac
+done
+
+[ -n "$run_id" ] || { usage >&2; exit 2; }
+
+run_dir="$repo_root/experiments/$game/$run_id"
+[ -d "$run_dir" ] || die "run dir not found: $run_dir"
+
+status_file="$run_dir/status"
+events_file="$run_dir/events.jsonl"
+
+log() { [ "$quiet" -eq 1 ] || echo "[$(date '+%H:%M:%S')] $*"; }
+
+log "watching $game/$run_id (poll every ${interval}s)"
+log "  status file: $status_file"
+
+start_wall=$(date +%s)
+last_event_count=0
+while true; do
+  if [ ! -f "$status_file" ]; then
+    log "waiting for run to emit a status file..."
+  else
+    current=$(cat "$status_file" 2>/dev/null || echo "")
+    if [ -n "$current" ] && [ "$current" != "running" ] && [ "$current" != "starting" ]; then
+      break
+    fi
+  fi
+
+  # Heartbeat: show event count every ~5 polls.
+  if [ "$quiet" -eq 0 ] && [ -f "$events_file" ]; then
+    ec=$(wc -l < "$events_file" 2>/dev/null | tr -d ' ')
+    if [ "$ec" != "$last_event_count" ]; then
+      elapsed=$(( $(date +%s) - start_wall ))
+      log "alive — events=$ec (+$((ec - last_event_count))) elapsed=${elapsed}s"
+      last_event_count=$ec
+    fi
+  fi
+
+  sleep "$interval"
+done
+
+final_status=$(cat "$status_file" 2>/dev/null || echo "unknown")
+elapsed=$(( $(date +%s) - start_wall ))
+log "run ended: status=$final_status elapsed=${elapsed}s"
+
+# Build a short summary from the events tail.
+summary=""
+if [ -f "$events_file" ]; then
+  summary=$(tail -n 40 "$events_file" | python3 -c "
+import sys, json
+lines = []
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw: continue
+    try: e = json.loads(raw)
+    except: continue
+    t = e.get('type')
+    if t == 'iter_end':
+        lines.append(f'  iter {e.get(\"iter\")} end dur={e.get(\"duration_s\")}s')
+    elif t == 'eval':
+        lines.append(f'  iter {e.get(\"iter\")} eval vs={e.get(\"opponent\")} {e.get(\"wins\")}-{e.get(\"losses\")}-{e.get(\"draws\")} score={e.get(\"score\")}')
+    elif t == 'run_end':
+        lines.append(f'  run_end status={e.get(\"status\")} dur={e.get(\"duration_s\")}s')
+print('\n'.join(lines[-10:]))
+" || true)
+fi
+
+# macOS notification.
+if [ "$no_notify" -eq 0 ] && command -v osascript >/dev/null 2>&1; then
+  title="MLFactory: $run_id"
+  subtitle="status=$final_status (${elapsed}s)"
+  if [ "$dry" -eq 1 ]; then
+    log "(dry run) would: osascript notification '$title' '$subtitle'"
+  else
+    osascript -e "display notification \"$subtitle\" with title \"$title\" sound name \"Glass\"" || true
+  fi
+fi
+
+# Terminal bell.
+if [ "$no_bell" -eq 0 ]; then
+  printf '\a' || true
+fi
+
+# Session wake-up.
+if [ -n "$session" ]; then
+  if [ -z "$message" ]; then
+    message="MLFactory run '$run_id' finished with status=$final_status after ${elapsed}s.
+
+Recent events:
+$summary
+
+Next steps: run 'uv run mlfactory list' for an overview, 'uv run mlfactory watch $run_id' to inspect the dashboard, and/or read experiments/$game/$run_id/samples/ for saved games."
+  fi
+  log "poking session '$session'"
+  if [ "$dry" -eq 1 ]; then
+    if command -v poke-session >/dev/null 2>&1; then
+      poke-session --dry-run "$session" "$message" || true
+    else
+      ~/bin/poke-session --dry-run "$session" "$message" || true
+    fi
+  else
+    if command -v poke-session >/dev/null 2>&1; then
+      poke-session "$session" "$message"
+    else
+      ~/bin/poke-session "$session" "$message"
+    fi
+  fi
+fi
+
+log "done."
