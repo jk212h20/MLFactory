@@ -40,8 +40,8 @@ bash scripts/demo-phase0.sh         # the end-to-end phase-0 proof
 |-------|------|--------|
 | 0 | Scaffold + env verified + wiki seeded | ✅ Done |
 | 1 | Env protocol, Connect 4 (bitboard), vanilla UCT MCTS, colour-balanced arena with ELO | ✅ Done |
-| 2 | Boop rules ported from `Boop/server/src/game/GameState.ts`; 10k-game Python↔TS parity test; symmetry group | ⏳ Next |
-| 3 | AlphaZero-lite trained on Boop; beats `DeepThinker` (currently 75.6% tournament champion) ≥60% in 100-game match; beats the human (you) in 10-game match | ⏳ |
+| 2 | Boop rules ported from `Boop/server/src/game/GameState.ts`; 10k-game Python↔TS parity test (zero divergences); D4 symmetry group; tensor encoding; MCTS sign bug discovered+fixed | ✅ Done |
+| 3 | AlphaZero-lite trained on Boop; beats `DeepThinker` (currently 75.6% tournament champion) ≥60% in 100-game match; beats the human (you) in 10-game match | ⏳ Next |
 | 4 | Solve / strong evidence of first-player advantage in Boop | ⏳ stretch |
 
 See [`results/`](results/) for phase reports.

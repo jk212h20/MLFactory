@@ -176,29 +176,43 @@ class MCTSAgent:
     def _rollout(self, env: Env, node: _Node) -> float:
         """Play uniform-random moves from node.state to terminal.
 
-        Returns the reward for the player who just moved INTO `node`.
+        Returns the reward for the player who just moved INTO `node`, which is
+        NOT node.to_play_at_entry. Specifically, mover-into-node was the player
+        who made the move from node.parent that produced this node. That player
+        is `1 - node.to_play_at_entry`, i.e. the player whose turn is NOT at this
+        node (they just moved; now it's the other player's turn at this node).
 
-        - If `node` is already terminal: reward is -env.terminal_value(state),
-          because terminal_value is from state.to_play's perspective (the player
-          who would move next), and the mover is the *other* player.
-        - Otherwise: random playout, then same sign adjustment.
+        Conventions assumed:
+        - state.winner is 0 / 1 / None.
+        - game is zero-sum: if winner is P, reward for P is +1, for 1-P is -1.
+        - draws return 0.
         """
         state = node.state
-        if state.is_terminal:
-            # terminal_value is from perspective of state.to_play (the side that would move next)
-            # The "mover into this node" was 1 - state.to_play, i.e. opposite perspective.
-            return -env.terminal_value(state)
+        mover_into_node = 1 - node.to_play_at_entry
 
-        # Random rollout
+        # If the node itself is already terminal, return its outcome from
+        # mover-into-node's perspective.
+        if state.is_terminal:
+            if state.winner is None:
+                return 0.0
+            return 1.0 if state.winner == mover_into_node else -1.0
+
+        # Random rollout to terminal.
         while not state.is_terminal:
             legal = env.legal_actions(state)
+            if not legal:
+                # No legal moves in a non-terminal state. We conventionally
+                # treat this as a loss for the side-to-move. This edge case
+                # is never reached in real games from initial_state() on any
+                # supported env, but defensive handling prevents a crash on
+                # synthetic positions.
+                loser = state.to_play
+                winner = 1 - loser
+                return 1.0 if winner == mover_into_node else -1.0
             action = legal[self.rng.randrange(len(legal))]
             state = env.step(state, action)
 
-        # Terminal reached: flip sign to put it in the mover-into-node's perspective.
-        # After the rollout, `state.to_play` is the side that would go if game continued.
-        # The mover into `node` had to_play == node.to_play_at_entry.
-        # Reward for mover = +1 if node.to_play_at_entry won, -1 if lost, 0 if draw.
+        # Terminal reached. state.winner is the winning player (or None for draw).
         if state.winner is None:
             return 0.0
-        return 1.0 if state.winner == node.to_play_at_entry else -1.0
+        return 1.0 if state.winner == mover_into_node else -1.0

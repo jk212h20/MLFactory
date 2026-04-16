@@ -52,3 +52,6 @@ runs/
 
 # OS
 Thumbs.db
+
+# Node (Boop TS bridge deps)
+node_modules/

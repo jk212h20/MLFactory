@@ -82,3 +82,46 @@ Insights logged:
 - [[insights/2026-04-16-mcts-logarithmic-in-sims]]
 
 On to Phase 2: port Boop rules and prove parity with the TypeScript source.
+
+## Phase 2 — Boop Rules, Parity, D4 Symmetry (2026-04-16)
+
+Ported `Boop/server/src/game/GameState.ts` into Python, one rule at a time, as `src/mlfactory/games/boop/rules.py`. Wrote 18 hand-written tests covering boops, chains, graduations (single + multi-option), stranded-fallback, win conditions, and immutability. All green.
+
+Then the big validation: a Node/tsx stdio bridge that exposes the original TS `BoopGame` unchanged, plus a Python client, plus a canonical-form state comparator. Ran 10,000 random games through both side by side: **571,266 state transitions, zero divergences**. Python rules are byte-identical to TypeScript.
+
+Surprises along the way:
+
+- **Turn-advancement quirk**: TS `selectGraduation()` leaves `currentTurn` alone when graduation produces a win, but `placePiece()` always advances it. Caught at game 1520 of the first 10k pass. Mirrored for parity; `terminal_value()` handles both sign cases.
+- **Graduation-choice wins are impossible**: the code path exists in TS (and now our port) but graduation removes pieces while win conditions require cats on the board. Dead code preserved for parity, fully inert.
+- **Stranded-fallback breaks D4 symmetry**: TS tie-breaks by row-major order, which is not rotation-invariant. Added `Boop.would_trigger_stranded_fallback()` so augmentation code can skip these (rare) transitions.
+- **Dead-end states exist in theory**: never observed in 10,000 games from initial state, but possible from synthetic positions. Added `_terminal_if_stuck()` as a defensive extension.
+
+Then the **major find**: adding Boop to the CLI and running an MCTS tournament showed MCTS *losing* to Random. After diagnostics, found an inverted sign in `mcts.py::_rollout()` — the random-playout branch compared `winner == node.to_play_at_entry` where it should have compared against `1 - node.to_play_at_entry` (the mover-INTO-node, not the mover-FROM-node). The terminal-entry branch was correct; they were inconsistent.
+
+Impact of the fix was large:
+- Boop: MCTS(200) went from 0/20 vs Random → 20/20 vs Random.
+- Connect 4: every MCTS agent gained 500–650 ELO. MCTS(50) went from 1510 → 2158.
+- The Phase-1 "MCTS(50) ≈ Random" finding was retracted as a bug masquerading as an insight.
+
+This was a good lesson in why "it works" on one game isn't enough. Adding a second game exposed the latent bug. Also good evidence for the Phase-3 rule: always sanity-check on obvious immediate-win positions.
+
+Sources referenced:
+- [[sources/browne2012-mcts-survey]] — re-read for the UCT sign convention.
+
+Questions opened:
+- Q-009 (not yet written up): any similar perspective bugs in arena/ELO?
+- Q-010: what's the right smoke test to catch this class of bug at introduction?
+
+Techniques promoted:
+- [[techniques/mcts-uct]] — validated on two distinct games post-fix, stays stable.
+
+Insights logged:
+- [[insights/2026-04-16-mcts-sign-bug]] — the big one.
+- (retracted in part: [[insights/2026-04-16-mcts-logarithmic-in-sims]] — 50-sim "noise floor" was a bug, not a floor.)
+
+Infrastructure added:
+- `src/mlfactory/games/boop/{rules,encode,symmetry,parity,bridge_client}.py`.
+- `src/mlfactory/games/boop/bridge/` — Node stdio bridge to the authoritative TS rules.
+- `scripts/verify-boop-rules.sh` for large-batch parity runs.
+
+Ready for Phase 3: AlphaZero-lite training on Boop.

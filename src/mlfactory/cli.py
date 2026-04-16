@@ -14,6 +14,7 @@ from mlfactory.agents.base import Agent
 from mlfactory.agents.mcts import MCTSAgent
 from mlfactory.agents.random_agent import RandomAgent
 from mlfactory.core.env import Env
+from mlfactory.games.boop import Boop
 from mlfactory.games.connect4 import Connect4
 from mlfactory.tools.arena import round_robin
 
@@ -49,6 +50,7 @@ def doctor() -> None:
 
 GAMES: dict[str, type] = {
     "connect4": Connect4,
+    "boop": Boop,
 }
 
 

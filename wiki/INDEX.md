@@ -22,14 +22,15 @@ A cross-referenced table of contents for the MLFactory wiki. See [`README.md`](R
 
 ## Games
 - Boop
-  - [[games/boop/rules-summary]] — placeholder; filled in during Phase 2.
+  - [[games/boop/rules-summary]] — **stable**. Complete rules with empirical numbers from the 10k-game parity verification.
 
 ## Trails
 - [[trails/2026-04-getting-mlfactory-off-the-ground]] — the Phase 0 narrative.
 
-## Insights (1)
+## Insights (2)
 - [[insights/INSIGHTS]] — chronological feed.
-- [[insights/2026-04-16-mcts-logarithmic-in-sims]] — **2026-04-16**. ~300 ELO per 4× sim budget on Connect 4; MCTS(50) ≈ Random.
+- [[insights/2026-04-16-mcts-sign-bug]] — **2026-04-16**. MCTS had an inverted-sign bug in the random-rollout branch; fix added 500–650 ELO per MCTS agent on Connect 4 and fully inverted the Boop result (MCTS was *losing* to Random pre-fix).
+- [[insights/2026-04-16-mcts-logarithmic-in-sims]] — **2026-04-16**. ~300 ELO per 4× sim budget on Connect 4. Partially retracted: the 50-sim "noise floor" was the sign bug, not a real floor.
 
 ## Navigating
 

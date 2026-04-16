@@ -2,7 +2,16 @@
 
 **Status**: ✅ Complete
 **Date**: 2026-04-16
-**Git SHA**: (recorded at commit)
+**Git SHA**: `153dedf` (Phase 1 commit)
+
+> **⚠️ Retraction (Phase 2 follow-up)**: the MCTS numbers in this report were later found
+> to be weakened by an inverted-sign bug in `_rollout()` that was exposed when Phase 2 added
+> a second game (Boop). The bug was fixed in Phase 2; every MCTS agent gained 500–650 ELO.
+> The specific claim that "MCTS(50) ≈ Random" was a bug, not a noise floor. See
+> [`results/phase2-boop-parity.md`](phase2-boop-parity.md) and
+> [`../wiki/insights/2026-04-16-mcts-sign-bug.md`](../wiki/insights/2026-04-16-mcts-sign-bug.md)
+> for the full analysis. The infrastructure and monotonic-ladder finding stand;
+> the exact per-budget ELO values do not.
 
 ## Goal
 

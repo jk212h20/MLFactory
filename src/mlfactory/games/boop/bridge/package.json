@@ -1,0 +1,13 @@
+{
+  "name": "mlfactory-boop-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node/TSX stdio bridge exposing Boop's authoritative GameState.ts rules to Python for parity testing",
+  "scripts": {
+    "bridge": "tsx bridge.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.6.0",
+    "typescript": "^5.2.2"
+  }
+}

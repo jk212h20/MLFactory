@@ -11,7 +11,8 @@ A dated feed of surprising findings from MLFactory experiments. Each entry links
 
 ## Log
 
-- **2026-04-16** — [[insights/2026-04-16-mcts-logarithmic-in-sims]]: on Connect 4, vanilla UCT gains ~300 ELO per 4× simulation budget; MCTS(50) is statistically indistinguishable from Random. Noise-floor threshold sits between 50 and 200 sims.
+- **2026-04-16** — [[insights/2026-04-16-mcts-sign-bug]]: **MCTS had an inverted-sign bug in the random-rollout branch that was half-hidden on Connect 4 and fully exposed by Boop.** The Phase-1 "MCTS(50) ≈ Random" finding was not a noise floor — it was a bug. Post-fix MCTS(50) is ~650 ELO above random on Connect 4. Retroactively invalidates part of the 2026-04-16 logarithmic-ELO insight below.
+- **2026-04-16** — [[insights/2026-04-16-mcts-logarithmic-in-sims]]: on Connect 4, vanilla UCT gains ~300 ELO per 4× simulation budget. (Retracted in part: the 50-sim plateau was a bug, not a real noise floor. The logarithmic scaling holds at higher budgets post-fix.)
 
 ---
 
