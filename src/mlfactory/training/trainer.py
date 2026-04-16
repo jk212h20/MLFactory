@@ -96,6 +96,17 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT, _handle_sigterm)
 
+    # PyTorch CPU threading: force single-thread for batch-1 inference.
+    # For self-play / eval the net does thousands of batch-1 forward passes
+    # per game; PyTorch's default multi-threaded CPU kernels have per-call
+    # OpenMP fork/join overhead that dwarfs the actual compute on tiny
+    # (6x6) inputs. We saw this pathology in the first realistic smoke
+    # (40+ min stuck in batch_norm_cpu_kernel / pthread_cond_wait). Setting
+    # intra- and inter-op threads to 1 fixes it. Training itself runs on
+    # MPS (or GPU), unaffected by these knobs.
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+
     # Build layout from --run-dir
     run_dir = Path(args.run_dir)
     run_id = run_dir.name
