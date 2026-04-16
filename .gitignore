@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.hypothesis/
+
+# Experiments: all run artifacts are reproducible, don't version them
+experiments/**/*
+!experiments/.gitkeep
+
+# Large checkpoints / data
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+checkpoints/
+data/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+*.log
+wandb/
+runs/
+
+# OS
+Thumbs.db

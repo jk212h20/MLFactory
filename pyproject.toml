@@ -1,0 +1,58 @@
+[project]
+name = "mlfactory"
+version = "0.0.1"
+description = "A self-improving automated games strategy research factory. Tools, agents, and a living wiki for finding game strategies with machine learning."
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [
+    { name = "Nick" },
+]
+license = { text = "MIT" }
+keywords = ["reinforcement-learning", "games", "alphazero", "mcts", "self-play"]
+
+dependencies = [
+    # Core ML
+    "torch>=2.8.0",
+    "numpy>=2.0",
+    # CLI / UX
+    "rich>=14.0",
+    "typer>=0.12",
+    "tqdm>=4.66",
+    # Config / validation
+    "pydantic>=2.10",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-xdist>=3.5",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+plot = [
+    "matplotlib>=3.9",
+]
+
+[project.scripts]
+mlfactory = "mlfactory.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mlfactory"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+ignore = ["E501"]  # line length handled by formatter
