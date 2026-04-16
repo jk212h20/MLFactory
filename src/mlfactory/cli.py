@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -16,6 +17,10 @@ from mlfactory.agents.random_agent import RandomAgent
 from mlfactory.core.env import Env
 from mlfactory.games.boop import Boop
 from mlfactory.games.connect4 import Connect4
+from mlfactory.runner.launcher import launch_run, run_is_alive, stop_run
+from mlfactory.runner.layout import RunLayout, list_runs, new_run_id
+from mlfactory.runner.replay import replay_file
+from mlfactory.runner.watch import watch as watch_run
 from mlfactory.tools.arena import round_robin
 
 app = typer.Typer(
@@ -174,6 +179,149 @@ def match(
         f"\n{a.name}: {result.a_wins}W  {b.name}: {result.b_wins}W  draws: {result.draws}\n"
         f"{a.name} score: {result.a_win_rate:.3f}  95% CI: [{lo:.3f}, {hi:.3f}]"
     )
+
+
+# --- Runner commands ----------------------------------------------------
+
+# Trainer registry: maps --trainer values to Python module paths.
+TRAINERS: dict[str, str] = {
+    "dummy": "mlfactory.runner.dummy_trainer",
+}
+
+
+def _workspace_root() -> Path:
+    """Repo root — the directory containing `experiments/`."""
+    # The CLI is installed as a package; use CWD so `mlfactory` picks up
+    # the user's workspace, not the installed wheel location.
+    return Path.cwd()
+
+
+def _resolve_run(run_id: str, game: str | None = None) -> RunLayout:
+    """Find a run by exact id or by trailing-slug match."""
+    root = _workspace_root()
+    runs = list_runs(root, game=game)
+    # Exact match first
+    for r in runs:
+        if r.run_id == run_id:
+            return r
+    # Endswith / contains match (useful for tab-completion-lite)
+    matches = [r for r in runs if r.run_id.endswith(run_id) or run_id in r.run_id]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise typer.BadParameter(f"no run matching '{run_id}' under experiments/")
+    raise typer.BadParameter(f"ambiguous run '{run_id}'; matches: {[m.run_id for m in matches]}")
+
+
+@app.command("train")
+def train(
+    trainer: str = typer.Option("dummy", help=f"Trainer: {sorted(TRAINERS)}"),
+    game: str = typer.Option("boop", help="Game to train on."),
+    name: str = typer.Option("", help="Optional human label appended to run id."),
+    iters: int = typer.Option(10, help="Number of training iterations."),
+    iter_seconds: float = typer.Option(1.0, help="[dummy only] seconds per fake iteration."),
+    seed: int = typer.Option(0, help="Trainer RNG seed."),
+) -> None:
+    """Launch a training run as a detached subprocess and return immediately."""
+    if trainer not in TRAINERS:
+        raise typer.BadParameter(f"unknown trainer '{trainer}'. Options: {sorted(TRAINERS)}")
+
+    root = _workspace_root()
+    run_id = new_run_id(name or trainer)
+    layout = RunLayout(root=root, game=game, run_id=run_id)
+
+    trainer_args: list[str] = ["--iters", str(iters), "--seed", str(seed)]
+    if trainer == "dummy":
+        trainer_args += ["--iter-seconds", str(iter_seconds)]
+
+    config_summary = {
+        "trainer": trainer,
+        "game": game,
+        "iters": iters,
+        "seed": seed,
+    }
+    if trainer == "dummy":
+        config_summary["iter_seconds"] = iter_seconds
+
+    pid = launch_run(
+        layout,
+        trainer_module=TRAINERS[trainer],
+        trainer_args=trainer_args,
+        config_summary=config_summary,
+    )
+    console.print(f"[green]started[/green] run [bold]{run_id}[/bold] (pid {pid})")
+    console.print(f"  dir:   {layout.dir}")
+    console.print(f"  watch: [cyan]mlfactory watch {run_id}[/cyan]")
+    console.print(f"  stop:  [cyan]mlfactory stop {run_id}[/cyan]")
+    console.print(f"  tail:  [dim]tail -f {layout.log_path}[/dim]")
+
+
+@app.command("list")
+def list_cmd(
+    game: str = typer.Option("", help="Filter by game; empty = all."),
+    limit: int = typer.Option(20, help="Max runs to show (most recent first)."),
+) -> None:
+    """List all training runs in the current workspace."""
+    root = _workspace_root()
+    runs = list_runs(root, game=game or None)
+    if not runs:
+        console.print("[dim]no runs found under experiments/[/dim]")
+        return
+
+    # Most recent first (run ids are timestamp-prefixed).
+    runs = sorted(runs, key=lambda r: r.run_id, reverse=True)[:limit]
+
+    tbl = Table(title=f"Runs ({len(runs)})")
+    tbl.add_column("run_id")
+    tbl.add_column("game")
+    tbl.add_column("status")
+    tbl.add_column("proc")
+    tbl.add_column("events", justify="right")
+    tbl.add_column("samples", justify="right")
+    for r in runs:
+        status = r.read_status()
+        alive = "[green]alive[/green]" if run_is_alive(r) else "[dim]—[/dim]"
+        # cheap event/sample counts
+        n_events = 0
+        if r.events_path.exists():
+            with r.events_path.open("rb") as f:
+                n_events = sum(1 for _ in f)
+        n_samples = sum(1 for _ in r.samples_dir.rglob("*.json")) if r.samples_dir.exists() else 0
+        tbl.add_row(r.run_id, r.game, status, alive, str(n_events), str(n_samples))
+    console.print(tbl)
+
+
+@app.command("watch")
+def watch_cmd(
+    run_id: str = typer.Argument(..., help="Run id (or trailing slug)."),
+    game: str = typer.Option("", help="Disambiguate by game."),
+    refresh: float = typer.Option(4.0, help="Refresh Hz."),
+) -> None:
+    """Attach a live TUI to a running (or finished) run. Ctrl-C to detach."""
+    layout = _resolve_run(run_id, game=game or None)
+    watch_run(layout, refresh_hz=refresh)
+
+
+@app.command("stop")
+def stop_cmd(
+    run_id: str = typer.Argument(..., help="Run id (or trailing slug)."),
+    game: str = typer.Option("", help="Disambiguate by game."),
+    timeout: float = typer.Option(30.0, help="Graceful SIGTERM timeout before SIGKILL."),
+) -> None:
+    """Request a graceful stop; escalate to SIGKILL after timeout."""
+    layout = _resolve_run(run_id, game=game or None)
+    result = stop_run(layout, timeout=timeout)
+    color = {"stopped": "green", "killed": "yellow", "not_running": "dim"}.get(result, "white")
+    console.print(f"[{color}]{result}[/{color}] {layout.run_id}")
+
+
+@app.command("replay")
+def replay_cmd(
+    path: Path = typer.Argument(..., help="Path to a sample-game JSON file."),
+    step: bool = typer.Option(False, help="Pause for Enter between moves."),
+) -> None:
+    """Render a saved sample game to the terminal."""
+    replay_file(path, console=console, step=step)
 
 
 if __name__ == "__main__":
