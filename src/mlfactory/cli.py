@@ -186,6 +186,7 @@ def match(
 # Trainer registry: maps --trainer values to Python module paths.
 TRAINERS: dict[str, str] = {
     "dummy": "mlfactory.runner.dummy_trainer",
+    "alphazero": "mlfactory.training.trainer",
 }
 
 
@@ -215,11 +216,27 @@ def _resolve_run(run_id: str, game: str | None = None) -> RunLayout:
 
 @app.command("train")
 def train(
-    trainer: str = typer.Option("dummy", help=f"Trainer: {sorted(TRAINERS)}"),
+    trainer: str = typer.Option("alphazero", help=f"Trainer: {sorted(TRAINERS)}"),
     game: str = typer.Option("boop", help="Game to train on."),
     name: str = typer.Option("", help="Optional human label appended to run id."),
-    iters: int = typer.Option(10, help="Number of training iterations."),
+    iters: int = typer.Option(5, help="Number of training iterations."),
+    # Dummy-trainer option (ignored by alphazero)
     iter_seconds: float = typer.Option(1.0, help="[dummy only] seconds per fake iteration."),
+    # AlphaZero-trainer options (ignored by dummy)
+    selfplay_games: int = typer.Option(20, help="[az] games per self-play batch."),
+    selfplay_sims: int = typer.Option(100, help="[az] PUCT sims per move in self-play."),
+    eval_games: int = typer.Option(20, help="[az] games per eval match."),
+    eval_sims: int = typer.Option(100, help="[az] PUCT sims per move in eval."),
+    baseline_mcts_sims: int = typer.Option(200, help="[az] sims for the fixed MCTS baseline."),
+    train_batches: int = typer.Option(100, help="[az] training minibatches per iteration."),
+    batch_size: int = typer.Option(128, help="[az] training batch size."),
+    lr: float = typer.Option(1e-3, help="[az] learning rate."),
+    warmup_samples: int = typer.Option(256, help="[az] min buffer size before training starts."),
+    net_blocks: int = typer.Option(4, help="[az] residual blocks."),
+    net_channels: int = typer.Option(64, help="[az] channels per block."),
+    device: str = typer.Option("mps", help="[az] torch device for training (mps|cpu|cuda)."),
+    samples_per_iter: int = typer.Option(2, help="[az] self-play games saved per iteration."),
+    no_augment: bool = typer.Option(False, help="[az] disable D4 symmetry augmentation."),
     seed: int = typer.Option(0, help="Trainer RNG seed."),
 ) -> None:
     """Launch a training run as a detached subprocess and return immediately."""
@@ -231,17 +248,63 @@ def train(
     layout = RunLayout(root=root, game=game, run_id=run_id)
 
     trainer_args: list[str] = ["--iters", str(iters), "--seed", str(seed)]
-    if trainer == "dummy":
-        trainer_args += ["--iter-seconds", str(iter_seconds)]
-
-    config_summary = {
+    config_summary: dict = {
         "trainer": trainer,
         "game": game,
         "iters": iters,
         "seed": seed,
     }
+
     if trainer == "dummy":
+        trainer_args += ["--iter-seconds", str(iter_seconds)]
         config_summary["iter_seconds"] = iter_seconds
+    elif trainer == "alphazero":
+        trainer_args += [
+            "--selfplay-games",
+            str(selfplay_games),
+            "--selfplay-sims",
+            str(selfplay_sims),
+            "--eval-games",
+            str(eval_games),
+            "--eval-sims",
+            str(eval_sims),
+            "--baseline-mcts-sims",
+            str(baseline_mcts_sims),
+            "--train-batches",
+            str(train_batches),
+            "--batch-size",
+            str(batch_size),
+            "--lr",
+            str(lr),
+            "--warmup-samples",
+            str(warmup_samples),
+            "--net-blocks",
+            str(net_blocks),
+            "--net-channels",
+            str(net_channels),
+            "--device",
+            device,
+            "--samples-per-iter",
+            str(samples_per_iter),
+        ]
+        if no_augment:
+            trainer_args.append("--no-augment")
+        config_summary.update(
+            {
+                "selfplay_games": selfplay_games,
+                "selfplay_sims": selfplay_sims,
+                "eval_games": eval_games,
+                "eval_sims": eval_sims,
+                "baseline_mcts_sims": baseline_mcts_sims,
+                "train_batches": train_batches,
+                "batch_size": batch_size,
+                "lr": lr,
+                "net_blocks": net_blocks,
+                "net_channels": net_channels,
+                "device": device,
+                "augment": not no_augment,
+            }
+        )
 
     pid = launch_run(
         layout,
