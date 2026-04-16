@@ -1,12 +1,14 @@
 ---
 type: technique
-status: seed
+status: stable
 created: 2026-04-16
 updated: 2026-04-16
 tags: [mcts, uct, search]
 links:
   sources: [browne2012-mcts-survey]
   answers: []
+  used_in: [src/mlfactory/agents/mcts.py]
+  validated_by: [results/phase1-mcts-baseline.md, insights/2026-04-16-mcts-logarithmic-in-sims]
 ---
 
 # Vanilla UCT MCTS
@@ -73,7 +75,13 @@ def uct_score(child, parent_visits, c):
 - **Rollout policy matters**: Uniform-random rollouts are an unbiased but noisy estimator. Light domain heuristics in rollouts can help — but **stronger rollouts can hurt** if they reduce diversity without being exactly correct.
 
 ## Implementation in MLFactory
-_(Phase 1 will implement this. File path: `src/mlfactory/agents/mcts.py`.)_
+- `src/mlfactory/agents/mcts.py` — `MCTSAgent`. Vanilla UCT with uniform-random rollouts.
+- Value convention: `node.value_sum / node.visits` is from the perspective of the player
+  who **moved into** that node. This makes UCT selection from a parent a plain maximisation
+  (the parent is choosing the child with the best score for whoever just made the move).
+- Backpropagation flips sign every ply as it walks up from the rollout terminal.
+- Validated on Connect 4: monotonic ELO ladder across {50, 200, 800} simulation budgets,
+  ~300 ELO per 4× budget (see [[insights/2026-04-16-mcts-logarithmic-in-sims]]).
 
 ## Sources
 - [[sources/browne2012-mcts-survey]]

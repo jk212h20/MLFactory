@@ -47,3 +47,38 @@ _None yet — Phase 0 ran no experiments. The first insight will come from Phase
 - The repo is its own git repo; plain-English commits; projects.json and PATTERNS.md updated in the parent ActiveProjects workspace.
 
 On to Phase 1: vanilla MCTS on tic-tac-toe and Connect 4, with an arena that reports win rates honestly.
+
+## Phase 1 — Connect 4, UCT, Arena (2026-04-16)
+
+Skipped tic-tac-toe entirely at the user's call ("too boring"). Jumped straight to Connect 4.
+
+What landed:
+- **Env protocol** (`src/mlfactory/core/env.py`) — immutable states, pure `step()`, side-to-move in the state, legal-action mask is authoritative.
+- **Connect 4** (`src/mlfactory/games/connect4.py`) — bitboard representation with the 49-bit sentinel-row trick so all four win checks are a few shifts + ANDs. 12 tests cover vert / horiz / both diagonals / illegals / immutability / legal-action consistency over 100 random games.
+- **Agents**: `RandomAgent` and `MCTSAgent` (vanilla UCT with light random playouts). The sign convention for backprop (value is from perspective of mover-into-node, flip every ply) was the main thing I had to think through carefully; it's documented in the technique page.
+- **Arena** (`src/mlfactory/tools/arena.py`) — `play_match`, `round_robin`, Wilson CIs, ELO via gradient descent on Bradley–Terry log-likelihood. Colour-balanced by default.
+- **CLI**: `mlfactory tournament` and `mlfactory match` with `rich`-rendered tables.
+
+Headline result from the Phase 1 tournament (40 games/pair, colour-balanced, ~26 s total):
+
+| rank | agent   | ELO  |
+|------|---------|------|
+| 1    | mcts800 | 2161 |
+| 2    | mcts200 | 1811 |
+| 3    | mcts50  | 1510 |
+| 4    | random  | 1500 |
+
+**The one surprise**: mcts50 is statistically indistinguishable from random on Connect 4. 50 rollouts is below the signal threshold for vanilla UCT with light playouts. That became [[insights/2026-04-16-mcts-logarithmic-in-sims]] — our first real insight, and a direct input into Phase 3 planning (don't try to run AlphaZero-lite with fewer than ~100 sims unless the prior is already meaningful).
+
+Techniques promoted:
+- [[techniques/mcts-uct]] — from `seed` to `stable`, now linked to its implementation and its validation.
+
+Questions opened but not yet answered:
+- Q-006: Does the 300-ELO-per-4x law hold on Boop?
+- Q-007: Analogous noise floor for AlphaZero-style MCTS?
+- Q-008: Does heavier rollout policy change the threshold?
+
+Insights logged:
+- [[insights/2026-04-16-mcts-logarithmic-in-sims]]
+
+On to Phase 2: port Boop rules and prove parity with the TypeScript source.

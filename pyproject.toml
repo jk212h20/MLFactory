@@ -48,6 +48,9 @@ packages = ["src/mlfactory"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-v --tb=short"
+markers = [
+    "slow: tests that take >5s (run explicitly with `-m slow`)",
+]
 
 [tool.ruff]
 line-length = 100

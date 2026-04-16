@@ -12,9 +12,9 @@ A cross-referenced table of contents for the MLFactory wiki. See [`README.md`](R
 ## Questions (1)
 - [[questions/Q-001-where-to-start]] — What algorithm and starting architecture for Boop on M4 Max? **Answered** (high confidence): AlphaZero-lite, 4 blocks × 64 channels, PUCT + Dirichlet, 100–200 MCTS sims/move, D4 augmentation, gate-less training.
 
-## Techniques (2, both `seed` — promote after first use in code)
-- [[techniques/mcts-uct]] — Vanilla UCT MCTS. Pattern + pitfalls. To be implemented in Phase 1.
-- [[techniques/self-play-pipeline]] — The AlphaZero-style training loop. Pattern + pitfalls + defaults. To be implemented in Phase 3.
+## Techniques (2: 1 stable, 1 seed)
+- [[techniques/mcts-uct]] — **stable**. Vanilla UCT MCTS. Implemented in `src/mlfactory/agents/mcts.py`; validated on Connect 4 tournament.
+- [[techniques/self-play-pipeline]] — **seed**. The AlphaZero-style training loop. Pattern + pitfalls + defaults. To be implemented in Phase 3.
 
 ## Advice (2)
 - [[advice/getting-started]] — The ladder for approaching a new game: rules → random → MCTS → symmetry → encoding → net → scale.
@@ -27,8 +27,9 @@ A cross-referenced table of contents for the MLFactory wiki. See [`README.md`](R
 ## Trails
 - [[trails/2026-04-getting-mlfactory-off-the-ground]] — the Phase 0 narrative.
 
-## Insights
-- [[insights/INSIGHTS]] — chronological feed (currently empty; first entries arrive in Phase 2 or 3).
+## Insights (1)
+- [[insights/INSIGHTS]] — chronological feed.
+- [[insights/2026-04-16-mcts-logarithmic-in-sims]] — **2026-04-16**. ~300 ELO per 4× sim budget on Connect 4; MCTS(50) ≈ Random.
 
 ## Navigating
 
