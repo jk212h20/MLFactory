@@ -244,6 +244,22 @@ def train(
     random_eval_every: int = typer.Option(
         1, help="[az] run the random baseline eval every N iters."
     ),
+    resume_from: str = typer.Option(
+        "", help="[az] path to a prior checkpoint; warm-start net weights."
+    ),
+    baseline_ckpt: str = typer.Option(
+        "", help="[az] path to a fixed opponent checkpoint for periodic eval."
+    ),
+    baseline_ckpt_every: int = typer.Option(5, help="[az] iters between baseline-ckpt evals."),
+    baseline_ckpt_games: int = typer.Option(20, help="[az] games per baseline-ckpt eval match."),
+    stop_on_baseline_win_rate: float = typer.Option(
+        0.0,
+        help="[az] stop when baseline-ckpt win rate >= this value "
+        "(held for stop-requires-consecutive evals). 0 = disabled.",
+    ),
+    stop_requires_consecutive: int = typer.Option(
+        1, help="[az] consecutive above-threshold baseline evals required to stop."
+    ),
     seed: int = typer.Option(0, help="Trainer RNG seed."),
 ) -> None:
     """Launch a training run as a detached subprocess and return immediately."""
@@ -303,7 +319,19 @@ def train(
             str(mcts_eval_every),
             "--random-eval-every",
             str(random_eval_every),
+            "--baseline-ckpt-every",
+            str(baseline_ckpt_every),
+            "--baseline-ckpt-games",
+            str(baseline_ckpt_games),
+            "--stop-on-baseline-win-rate",
+            str(stop_on_baseline_win_rate),
+            "--stop-requires-consecutive",
+            str(stop_requires_consecutive),
         ]
+        if resume_from:
+            trainer_args += ["--resume-from", resume_from]
+        if baseline_ckpt:
+            trainer_args += ["--baseline-ckpt", baseline_ckpt]
         config_summary.update(
             {
                 "selfplay_games": selfplay_games,
@@ -321,6 +349,12 @@ def train(
                 "n_workers": n_workers,
                 "mcts_eval_every": mcts_eval_every,
                 "random_eval_every": random_eval_every,
+                "resume_from": resume_from or None,
+                "baseline_ckpt": baseline_ckpt or None,
+                "baseline_ckpt_every": baseline_ckpt_every,
+                "baseline_ckpt_games": baseline_ckpt_games,
+                "stop_on_baseline_win_rate": stop_on_baseline_win_rate,
+                "stop_requires_consecutive": stop_requires_consecutive,
             }
         )
 

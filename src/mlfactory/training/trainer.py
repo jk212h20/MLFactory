@@ -97,6 +97,23 @@ class TrainerConfig:
     # eval cadence: how often to run the mcts baseline (every N iters)
     mcts_eval_every: int = 1
     random_eval_every: int = 1
+    # Warm-start: load net weights from this checkpoint before training.
+    # Replay buffer is NOT populated from the checkpoint (starts empty).
+    # If set, the checkpoint's NetConfig must match net_blocks/net_channels.
+    resume_from: str | None = None
+    # Optional: evaluate periodically against a fixed "baseline" checkpoint
+    # (typically the strongest prior champion). Separate from the per-iter
+    # eval-vs-prev and vs-mcts paths so we can track long-horizon progress
+    # without moving goalposts.
+    baseline_ckpt: str | None = None
+    baseline_ckpt_every: int = 5  # iters between baseline-ckpt evals
+    baseline_ckpt_games: int = 20  # games per baseline eval match
+    # Early stop: if eval-vs-baseline_ckpt score (wins / total) reaches
+    # `stop_on_baseline_win_rate` for `stop_requires_consecutive` consecutive
+    # baseline evals, exit gracefully (status=finished) before hitting iters.
+    # 0 or unset disables.
+    stop_on_baseline_win_rate: float = 0.0
+    stop_requires_consecutive: int = 1
 
 
 # --- Main -----------------------------------------------------------------
@@ -143,6 +160,24 @@ def main(argv: list[str] | None = None) -> int:
         channels=cfg.net_channels,
     )
     net = AlphaZeroNet(net_cfg).to(cfg.device)
+
+    # Warm-start: load weights from a prior checkpoint. Replay buffer
+    # stays empty on purpose — old self-play data came from a weaker
+    # policy and would drag training backwards.
+    if cfg.resume_from:
+        resume_path = Path(cfg.resume_from)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"--resume-from not found: {resume_path}")
+        prior_net, prior_extra = AlphaZeroNet.load(resume_path, map_location="cpu")
+        if prior_net.config != net_cfg:
+            raise ValueError(
+                f"Checkpoint NetConfig {prior_net.config} does not match "
+                f"trainer NetConfig {net_cfg}. Adjust --net-blocks / "
+                f"--net-channels to match the checkpoint."
+            )
+        net.load_state_dict(prior_net.state_dict())
+        net = net.to(cfg.device)
+
     optimizer = torch.optim.AdamW(net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     torch.manual_seed(cfg.seed)
     random.seed(cfg.seed)
@@ -155,6 +190,23 @@ def main(argv: list[str] | None = None) -> int:
 
     # Keep a snapshot of the previous iteration's net for eval-vs-prev.
     prev_net: AlphaZeroNet | None = None
+
+    # Fixed baseline opponent net (loaded once, reused across evals).
+    # Kept on CPU — eval agents always run CPU-side per the phase 3b
+    # MPS/batch-1 insight.
+    baseline_net: AlphaZeroNet | None = None
+    baseline_net_tag: str = "baseline"
+    if cfg.baseline_ckpt:
+        bpath = Path(cfg.baseline_ckpt)
+        if not bpath.exists():
+            raise FileNotFoundError(f"--baseline-ckpt not found: {bpath}")
+        baseline_net, _ = AlphaZeroNet.load(bpath, map_location="cpu")
+        baseline_net = baseline_net.cpu().eval()
+        baseline_net_tag = f"baseline:{bpath.stem}"
+
+    # Baseline-stop-rule tracking.
+    consecutive_baseline_hits = 0
+    last_baseline_score: float | None = None
 
     layout.write_status("running")
     write_event(
@@ -177,13 +229,38 @@ def main(argv: list[str] | None = None) -> int:
             "replay_capacity": cfg.replay_capacity,
             "augment": cfg.augment,
             "seed": cfg.seed,
+            "resume_from": cfg.resume_from,
+            "baseline_ckpt": cfg.baseline_ckpt,
+            "baseline_ckpt_every": cfg.baseline_ckpt_every,
+            "baseline_ckpt_games": cfg.baseline_ckpt_games,
+            "stop_on_baseline_win_rate": cfg.stop_on_baseline_win_rate,
+            "stop_requires_consecutive": cfg.stop_requires_consecutive,
         },
     )
+    if cfg.resume_from:
+        write_event(
+            layout.events_path,
+            "log",
+            level="info",
+            msg=f"warm-started net weights from {cfg.resume_from}",
+        )
+    if cfg.baseline_ckpt:
+        write_event(
+            layout.events_path,
+            "log",
+            level="info",
+            msg=f"baseline opponent: {cfg.baseline_ckpt} (every {cfg.baseline_ckpt_every} iters, {cfg.baseline_ckpt_games} games)",
+        )
+
+    # Flag flipped when the early-stop-by-baseline rule fires. Distinct
+    # from _stop_requested (which represents SIGTERM) so the run_end can
+    # report status="finished" for a goal-reached stop rather than "stopped".
+    early_stop_hit = False
 
     run_start = time.monotonic()
     try:
         for it in range(1, cfg.iters + 1):
-            if _stop_requested:
+            if _stop_requested or early_stop_hit:
                 break
             iter_t0 = time.monotonic()
             write_event(layout.events_path, "iter_start", iter=it)
@@ -280,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
 
             # ---------------- 4) EVAL ----------------
             ev_t0 = time.monotonic()
-            _run_eval(
+            baseline_score = _run_eval(
                 env=env,
                 game_name=game_name,
                 encoder=encoder,
@@ -290,6 +367,8 @@ def main(argv: list[str] | None = None) -> int:
                 iter_index=it,
                 seed=cfg.seed + it * 17,
                 layout=layout,
+                baseline_net=baseline_net,
+                baseline_tag=baseline_net_tag,
             )
             ev_elapsed = time.monotonic() - ev_t0
             write_event(
@@ -298,6 +377,28 @@ def main(argv: list[str] | None = None) -> int:
                 level="info",
                 msg=f"eval iter {it} completed in {ev_elapsed:.1f}s",
             )
+
+            # Early-stop rule: if baseline-win-rate threshold crossed
+            # `stop_requires_consecutive` times in a row, mark completion.
+            if baseline_score is not None and cfg.stop_on_baseline_win_rate > 0.0:
+                last_baseline_score = baseline_score
+                if baseline_score >= cfg.stop_on_baseline_win_rate:
+                    consecutive_baseline_hits += 1
+                else:
+                    consecutive_baseline_hits = 0
+                if consecutive_baseline_hits >= cfg.stop_requires_consecutive:
+                    write_event(
+                        layout.events_path,
+                        "log",
+                        level="info",
+                        msg=(
+                            f"early stop: baseline win rate >= "
+                            f"{cfg.stop_on_baseline_win_rate} for "
+                            f"{consecutive_baseline_hits} consecutive evals "
+                            f"(latest score={baseline_score:.3f})"
+                        ),
+                    )
+                    early_stop_hit = True
 
             # Update prev_net for next iter's eval.
             prev_net = _clone_net(net, cfg.device)
@@ -376,6 +477,46 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--random-eval-every", type=int, default=1, help="Run random baseline eval every N iters."
     )
+    p.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Path to a checkpoint to warm-start net weights from. "
+        "NetConfig shape must match --net-blocks / --net-channels.",
+    )
+    p.add_argument(
+        "--baseline-ckpt",
+        type=str,
+        default=None,
+        help="Path to a fixed opponent checkpoint. Evaluated every "
+        "--baseline-ckpt-every iters. Tracks long-horizon progress.",
+    )
+    p.add_argument(
+        "--baseline-ckpt-every",
+        type=int,
+        default=5,
+        help="Iters between baseline-checkpoint evaluations.",
+    )
+    p.add_argument(
+        "--baseline-ckpt-games",
+        type=int,
+        default=20,
+        help="Games per baseline-checkpoint evaluation match.",
+    )
+    p.add_argument(
+        "--stop-on-baseline-win-rate",
+        type=float,
+        default=0.0,
+        help="If >0, stop training once eval-vs-baseline_ckpt reaches this "
+        "fraction for --stop-requires-consecutive evaluations in a row.",
+    )
+    p.add_argument(
+        "--stop-requires-consecutive",
+        type=int,
+        default=1,
+        help="Number of consecutive baseline evals that must meet the "
+        "stop-on-baseline-win-rate threshold before stopping.",
+    )
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args(argv)
 
@@ -406,6 +547,12 @@ def _build_config(args: argparse.Namespace) -> TrainerConfig:
         n_workers=args.n_workers,
         mcts_eval_every=args.mcts_eval_every,
         random_eval_every=args.random_eval_every,
+        resume_from=args.resume_from,
+        baseline_ckpt=args.baseline_ckpt,
+        baseline_ckpt_every=args.baseline_ckpt_every,
+        baseline_ckpt_games=args.baseline_ckpt_games,
+        stop_on_baseline_win_rate=args.stop_on_baseline_win_rate,
+        stop_requires_consecutive=args.stop_requires_consecutive,
     )
 
 
@@ -615,12 +762,19 @@ def _run_eval(
     iter_index: int,
     seed: int,
     layout: RunLayout,
-) -> None:
-    """Evaluate vs prev checkpoint and (periodically) vs mcts baseline + random.
+    baseline_net: AlphaZeroNet | None = None,
+    baseline_tag: str = "baseline",
+) -> float | None:
+    """Evaluate vs prev checkpoint and (periodically) vs mcts baseline + random
+    + optional fixed baseline-ckpt.
 
     With n_workers > 1, each eval match's games run in parallel.
-    Cadence: `mcts_eval_every`, `random_eval_every` control how often the
-    fixed baselines run (always on iter 1 and on multiples of the cadence).
+    Cadence: `mcts_eval_every`, `random_eval_every`, `baseline_ckpt_every`
+    control how often each baseline runs (always on iter 1 and on multiples
+    of the cadence).
+
+    Returns the baseline-ckpt win rate if it was evaluated this iter,
+    else None. Used by the caller to implement early-stopping rules.
     """
     iter_samples_dir = layout.samples_dir / f"iter-{iter_index:04d}"
     iter_samples_dir.mkdir(parents=True, exist_ok=True)
@@ -649,6 +803,26 @@ def _run_eval(
             "log",
             level="info",
             msg=f"skipping eval-vs-prev at iter {iter_index} (no previous net)",
+        )
+
+    # --- Eval vs fixed baseline checkpoint (cadence-gated) ---
+    baseline_score: float | None = None
+    if baseline_net is not None and (iter_index == 1 or iter_index % cfg.baseline_ckpt_every == 0):
+        baseline_score = _eval_match_parallel(
+            env=env,
+            game_name=game_name,
+            encoder=encoder,
+            net=net,
+            cfg=cfg,
+            opponent_kind="az",
+            opp_net=baseline_net,
+            opp_sims=cfg.eval_sims,
+            opp_name=baseline_tag,
+            tag=baseline_tag,
+            n_games=cfg.baseline_ckpt_games,
+            iter_index=iter_index,
+            seed_base=seed + 50,
+            layout=layout,
         )
 
     # --- Eval vs MCTS baseline (cadence-gated) ---
@@ -696,6 +870,8 @@ def _run_eval(
             layout=layout,
         )
 
+    return baseline_score
+
 
 def _eval_match_parallel(
     *,
@@ -713,10 +889,11 @@ def _eval_match_parallel(
     iter_index: int,
     seed_base: int,
     layout: RunLayout,
-) -> None:
+) -> float | None:
     """Run one colour-balanced eval match, parallel if n_workers>1, sequential otherwise.
 
-    Emits a single 'eval' event with aggregated results.
+    Emits a single 'eval' event with aggregated results and returns the
+    win-rate (wins / total) for convenience, or None if no games were played.
     """
     # Colour-balanced assignment: games alternate a-as-player-0 / a-as-player-1.
     a_is_p0 = [i % 2 == 0 for i in range(n_games)]
@@ -767,6 +944,7 @@ def _eval_match_parallel(
         wins, losses, draws = int(r.a_wins), int(r.b_wins), int(r.draws)
         total = wins + losses + draws
 
+    score = wins / max(total, 1)
     write_event(
         layout.events_path,
         "eval",
@@ -776,8 +954,9 @@ def _eval_match_parallel(
         losses=losses,
         draws=draws,
         games=total,
-        score=round(wins / max(total, 1), 3),
+        score=round(score, 3),
     )
+    return score if total > 0 else None
 
 
 def _is_stop_requested() -> bool:
