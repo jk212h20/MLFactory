@@ -41,7 +41,7 @@ malformed tail lines (writer mid-flush) and skip unknown event types.
 | `iter_start` | each iteration start | `iter` |
 | `iter_end` | each iteration end | `iter`, `duration_s` |
 | `selfplay` | after self-play batch | `iter`, `games`, `avg_moves`, `orange_win_rate` |
-| `train` | after training pass | `iter`, `batches`, `policy_loss`, `value_loss`, `total_loss` |
+| `train` | after training pass | `iter`, `batches`, `policy_loss`, `value_loss`, `total_loss`, `policy_entropy`, `value_abs_mean`, `value_std`, `lr`, `duration_s` |
 | `eval` | after evaluation match | `iter`, `opponent`, `wins`, `losses`, `draws`, `score`, `elo`, `elo_delta` |
 | `checkpoint` | on save | `iter`, `path` (relative to run dir), `is_champion` (bool) |
 | `sample_game` | on sample save | `iter`, `path`, `kind` ∈ {selfplay, eval, champion} |
@@ -49,6 +49,24 @@ malformed tail lines (writer mid-flush) and skip unknown event types.
 
 The payload keys are guaranteed; additional keys may be added over time.
 **Readers must use `.get()` and tolerate missing/extra fields** for forward compat.
+
+### Training diagnostics (added 2026-04-16, phase 3d+)
+
+Beyond the loss values, each `train` event carries three shape-of-net
+diagnostics computed under `no_grad()` on the last minibatch:
+
+- `policy_entropy` — mean softmax entropy of the policy head, in nats.
+  For reference: uniform over ~20 legal moves (Boop's typical branching) is
+  `log(20) ≈ 3.0`. As the net becomes more confident, this trends down.
+- `value_abs_mean` — mean `|tanh(value)|`. 0 = predicting 0 everywhere;
+  1 = fully confident in each direction.
+- `value_std` — std of value predictions across the batch. Flat (low std)
+  means the net is not differentiating positions; high std means it is.
+
+These are **diagnostics, not training signal**. Loss going down does not
+mean the net is getting stronger (only arena eval does). But diagnostic
+drift (entropy crashing to 0, value_std collapsing) indicates training
+pathology.
 
 ## Example (excerpt from a dummy-trainer run)
 

@@ -152,6 +152,15 @@ def _render(layout: RunLayout, state: _DashState, *, alive: bool) -> Group:
             f"policy_loss={tr.get('policy_loss', '—')}",
             f"value_loss={tr.get('value_loss', '—')}",
         )
+        # Optional diagnostics: only show when present (backward compat with
+        # older runs whose train events didn't carry them).
+        if any(k in tr for k in ("policy_entropy", "value_abs_mean", "value_std")):
+            nums.add_row(
+                "[bold]diag[/bold]",
+                f"pol_entropy={tr.get('policy_entropy', '—')}",
+                f"|v|_mean={tr.get('value_abs_mean', '—')}",
+                f"v_std={tr.get('value_std', '—')}",
+            )
     if state.last_eval:
         ev = state.last_eval
         nums.add_row(

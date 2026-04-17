@@ -243,6 +243,9 @@ def main(argv: list[str] | None = None) -> int:
                     policy_loss=round(avg.policy, 4),
                     value_loss=round(avg.value, 4),
                     total_loss=round(avg.total, 4),
+                    policy_entropy=round(avg.policy_entropy, 4),
+                    value_abs_mean=round(avg.value_abs_mean, 4),
+                    value_std=round(avg.value_std, 4),
                     lr=cfg.lr,
                     duration_s=round(tr_elapsed, 2),
                 )

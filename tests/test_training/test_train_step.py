@@ -81,3 +81,33 @@ def test_mean_losses_handles_empty() -> None:
     assert m.total == 0.0
     assert m.policy == 0.0
     assert m.value == 0.0
+
+
+def test_train_step_reports_diagnostics() -> None:
+    """policy_entropy, value_abs_mean, value_std should all be populated and sensible."""
+    net = _tiny_net()
+    opt = torch.optim.AdamW(net.parameters(), lr=1e-3)
+    planes, policies, values = _synthetic_batch(16)
+    losses = train_step(net, opt, planes, policies, values, device="cpu")
+
+    # entropy is a real number between 0 and log(n_actions)
+    import math
+
+    assert 0.0 <= losses.policy_entropy <= math.log(104) + 1e-4
+    # |tanh| in [0, 1]
+    assert 0.0 <= losses.value_abs_mean <= 1.0
+    # value_std is non-negative
+    assert losses.value_std >= 0.0
+
+
+def test_diagnostics_aggregate_via_mean_losses() -> None:
+    """mean_losses averages the diagnostic fields too."""
+    net = _tiny_net()
+    opt = torch.optim.AdamW(net.parameters(), lr=1e-3)
+    planes, policies, values = _synthetic_batch(8)
+    a = train_step(net, opt, planes, policies, values, device="cpu")
+    b = train_step(net, opt, planes, policies, values, device="cpu")
+    m = mean_losses([a, b])
+    assert abs(m.policy_entropy - (a.policy_entropy + b.policy_entropy) / 2) < 1e-6
+    assert abs(m.value_abs_mean - (a.value_abs_mean + b.value_abs_mean) / 2) < 1e-6
+    assert abs(m.value_std - (a.value_std + b.value_std) / 2) < 1e-6

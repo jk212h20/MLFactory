@@ -25,6 +25,20 @@ class TrainLosses:
     policy: float
     value: float
     total: float
+    # Diagnostics (computed with no_grad; do not affect training):
+    #   policy_entropy: mean entropy of softmax(policy_logits) in nats.
+    #       For reference: uniform over K actions has entropy log(K);
+    #       for Boop with ~20 legal moves that's ~3.0. As the net gets
+    #       more confident, this should trend down.
+    #   value_abs_mean: mean |tanh(value)| in [0, 1]. A net predicting 0
+    #       everywhere has value_abs_mean = 0; a confident net
+    #       approaches 1 on decided positions.
+    #   value_std: std of value predictions across the batch. High spread
+    #       = the net is differentiating positions; flat = all predictions
+    #       are similar regardless of input.
+    policy_entropy: float = 0.0
+    value_abs_mean: float = 0.0
+    value_std: float = 0.0
 
 
 def train_step(
@@ -57,18 +71,33 @@ def train_step(
     total.backward()
     optimizer.step()
 
+    # Diagnostics (outside grad; cheap).
+    with torch.no_grad():
+        probs = torch.exp(log_probs)
+        # H = -sum(p * log p), clamped to avoid 0*(-inf).
+        entropy = -(probs * torch.clamp(log_probs, min=-30.0)).sum(dim=1).mean()
+        v_abs = value_pred.abs().mean()
+        v_std = value_pred.detach().std(unbiased=False)
+
     return TrainLosses(
         policy=float(policy_loss.item()),
         value=float(value_loss.item()),
         total=float(total.item()),
+        policy_entropy=float(entropy.item()),
+        value_abs_mean=float(v_abs.item()),
+        value_std=float(v_std.item()),
     )
 
 
 def mean_losses(losses: list[TrainLosses]) -> TrainLosses:
     if not losses:
         return TrainLosses(0.0, 0.0, 0.0)
+    n = len(losses)
     return TrainLosses(
-        policy=sum(l.policy for l in losses) / len(losses),
-        value=sum(l.value for l in losses) / len(losses),
-        total=sum(l.total for l in losses) / len(losses),
+        policy=sum(l.policy for l in losses) / n,
+        value=sum(l.value for l in losses) / n,
+        total=sum(l.total for l in losses) / n,
+        policy_entropy=sum(l.policy_entropy for l in losses) / n,
+        value_abs_mean=sum(l.value_abs_mean for l in losses) / n,
+        value_std=sum(l.value_std for l in losses) / n,
     )
