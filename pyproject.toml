@@ -21,6 +21,8 @@ dependencies = [
     # Config / validation
     "pydantic>=2.10",
     "pyyaml>=6.0",
+    "fastapi>=0.136.0",
+    "uvicorn[standard]>=0.44.0",
 ]
 
 [project.optional-dependencies]
@@ -59,3 +61,8 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM"]
 ignore = ["E501"]  # line length handled by formatter
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+]
