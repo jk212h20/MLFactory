@@ -41,6 +41,11 @@ experiments/**/*
 checkpoints/
 data/
 
+# Exception: deploy/checkpoints/ are small (< 2MB) canonical artefacts
+# that ship with the AZ service image.
+!deploy/checkpoints/
+!deploy/checkpoints/*.pt
+
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
