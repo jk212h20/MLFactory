@@ -204,12 +204,29 @@ def move(req: MoveRequest) -> MoveResponse:
 
     # Build the agent (fresh per-request is fine; PUCT state is not reusable).
     evaluator = NetEvaluator(net, encoder=_encoder, device="cpu", name="az-service")
+    # IMPORTANT: use greedy mode, NOT sample. Rationale:
+    #
+    # Earlier versions used mode="sample" with temperature_moves=4 so the
+    # opening would vary. But `AlphaZeroAgent._move_idx` is agent-instance-
+    # local, and we construct a fresh agent for every /move call. So the
+    # internal counter is always 0, which means sample mode was active for
+    # EVERY move in the game — not just the first 4. That caused
+    # occasional blunders in mid/late-game positions where two or three
+    # actions had non-trivial visit counts: even if the best one had the
+    # most visits, categorical sampling sometimes picked a worse one.
+    #
+    # Symptom observed: bot declined an immediate 3-in-a-row cat win and
+    # played a kitten instead. Root cause: the winning cat placement had
+    # high visits but the kitten placement also had some, and sampling
+    # got unlucky.
+    #
+    # For actual play we want the strongest move every time. If we later
+    # want opening variety we should track move index through the client
+    # side (humanColor + turn history) and pass it into the request.
     agent = AlphaZeroAgent(
         evaluator,
         PUCTConfig(n_simulations=sims),
-        mode="sample",
-        temperature=1.0,
-        temperature_moves=4,  # mild variety in openings; greedy afterwards
+        mode="greedy",
         add_root_noise=False,
         seed=seed,
         name="az-service",
