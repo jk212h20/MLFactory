@@ -398,6 +398,9 @@ def train_mandala(
     value_hidden: int = typer.Option(128, help="Value head hidden width."),
     device: str = typer.Option("mps", help="Training device."),
     samples_per_iter: int = typer.Option(2, help="Self-play games saved per iter."),
+    n_workers: int = typer.Option(
+        1, help="Parallel worker processes for self-play (1 = sequential)."
+    ),
     resume_from: str = typer.Option("", help="Checkpoint path to warm-start from."),
     baseline_ckpt: str = typer.Option("", help="Fixed baseline checkpoint for periodic eval."),
     baseline_ckpt_every: int = typer.Option(5, help="Iters between baseline evals."),
@@ -442,6 +445,8 @@ def train_mandala(
         device,
         "--samples-per-iter",
         str(samples_per_iter),
+        "--n-workers",
+        str(n_workers),
         "--baseline-ckpt-every",
         str(baseline_ckpt_every),
         "--baseline-ckpt-games",
@@ -465,6 +470,7 @@ def train_mandala(
         "lr": lr,
         "hidden": hidden,
         "n_blocks": n_blocks,
+        "n_workers": n_workers,
         "resume_from": resume_from or None,
         "baseline_ckpt": baseline_ckpt or None,
     }
