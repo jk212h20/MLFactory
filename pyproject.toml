@@ -65,4 +65,5 @@ ignore = ["E501"]  # line length handled by formatter
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "python-socketio[asyncio-client]>=5.16.1",
 ]
