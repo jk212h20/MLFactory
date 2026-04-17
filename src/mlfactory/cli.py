@@ -396,6 +396,107 @@ def stop_cmd(
     console.print(f"[{color}]{result}[/{color}] {layout.run_id}")
 
 
+@app.command("evaluate")
+def evaluate_cmd(
+    checkpoint: Path = typer.Argument(..., help="Path to a saved .pt checkpoint."),
+    game: str = typer.Option("boop", help="Game name (boop, connect4)."),
+    opponents: str = typer.Option(
+        "mcts:200,mcts:800,mcts:1600",
+        help="Comma-separated opponents, e.g. 'mcts:800,random,mcts:1600'.",
+    ),
+    n_games: int = typer.Option(40, help="Games per match (colour-balanced)."),
+    az_sims: int = typer.Option(100, help="PUCT sims per move for the checkpoint net."),
+    n_workers: int = typer.Option(12, help="Parallel worker processes."),
+    seed: int = typer.Option(0, help="RNG seed base."),
+) -> None:
+    """Evaluate a saved AlphaZero checkpoint against one or more opponents.
+
+    Runs colour-balanced matches in parallel workers and prints a summary
+    table. Useful for post-hoc evaluation at higher game counts than the
+    trainer's per-iter eval (which is only 10 games).
+    """
+    from mlfactory.agents.alphazero.net import AlphaZeroNet
+    from mlfactory.training.parallel import (
+        EvalJob,
+        parallel_eval,
+        serialise_net,
+    )
+
+    if not checkpoint.exists():
+        raise typer.BadParameter(f"checkpoint not found: {checkpoint}")
+
+    # Parse opponents
+    specs: list[tuple[str, int | None]] = []
+    for raw in opponents.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        if raw == "random":
+            specs.append(("random", None))
+        elif raw.startswith("mcts:"):
+            try:
+                sims = int(raw.split(":", 1)[1])
+            except ValueError:
+                raise typer.BadParameter(f"bad mcts spec: {raw}")
+            specs.append(("mcts", sims))
+        else:
+            raise typer.BadParameter(f"unknown opponent '{raw}'. Use 'random' or 'mcts:<N>'")
+
+    console.print(f"[bold]Evaluating[/bold] {checkpoint.name}")
+    console.print(f"  game: {game}  az_sims: {az_sims}  n_games/match: {n_games}")
+
+    net, extra = AlphaZeroNet.load(checkpoint)
+    net = net.cpu().eval()
+    console.print(f"  net: {net.param_count():,} params; extra={extra}")
+
+    az_bytes, az_cfg = serialise_net(net)
+
+    results_tbl = Table(title=f"{checkpoint.name} vs ... ({n_games} games each)")
+    results_tbl.add_column("opponent")
+    results_tbl.add_column("wins", justify="right")
+    results_tbl.add_column("losses", justify="right")
+    results_tbl.add_column("draws", justify="right")
+    results_tbl.add_column("score", justify="right")
+    results_tbl.add_column("wall", justify="right")
+
+    for opp_kind, opp_sims in specs:
+        tag = f"mcts{opp_sims}" if opp_kind == "mcts" else "random"
+        jobs = [
+            EvalJob(
+                game_name=game,
+                a_net_state_dict_bytes=az_bytes,
+                a_net_config_dict=az_cfg,
+                a_sims=az_sims,
+                a_temperature_moves=4,
+                a_name=f"az({checkpoint.stem})",
+                a_seed=seed + i,
+                opponent_kind=opp_kind,  # type: ignore[arg-type]
+                b_sims=opp_sims,
+                b_name=tag,
+                b_seed=seed + 10_000 + i,
+                a_is_player_0=(i % 2 == 0),
+            )
+            for i in range(n_games)
+        ]
+        t0 = time.monotonic()
+        gr = parallel_eval(jobs, n_workers=n_workers)
+        dt = time.monotonic() - t0
+        wins = sum(1 for r in gr if r.a_won)
+        losses = sum(1 for r in gr if r.b_won)
+        draws = sum(1 for r in gr if r.drew)
+        total = wins + losses + draws
+        score = wins / max(total, 1)
+        results_tbl.add_row(
+            tag,
+            str(wins),
+            str(losses),
+            str(draws),
+            f"{score:.2f}",
+            f"{dt:.0f}s",
+        )
+    console.print(results_tbl)
+
+
 @app.command("replay")
 def replay_cmd(
     path: Path = typer.Argument(..., help="Path to a sample-game JSON file."),

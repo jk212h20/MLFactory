@@ -110,9 +110,21 @@ class EvalGameResult:
 
 
 def _worker_init() -> None:
-    """Run once per worker process on startup."""
-    torch.set_num_threads(1)
-    torch.set_num_interop_threads(1)
+    """Run once per worker process on startup.
+
+    Sets torch to single-threaded per the phase-3b MPS/OpenMP insight.
+    `set_num_interop_threads` can only be called once per process before
+    any parallel work starts — wrapping in try/except so we don't die if
+    the child inherited a torch that's already done some work.
+    """
+    try:
+        torch.set_num_threads(1)
+    except RuntimeError:
+        pass
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
 
 
 def _make_env(game_name: str):
