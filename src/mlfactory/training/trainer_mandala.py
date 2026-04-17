@@ -523,6 +523,12 @@ def _play_one_game(
     ply = 0
     max_moves = 300
     while not state.is_terminal and ply < max_moves:
+        # Rare but real: Mandala can reach non-terminal states with zero
+        # legal actions (deck exhaustion + hand exhaustion). Abort the
+        # game cleanly as a draw rather than crashing PUCT.
+        legal = env.legal_actions(state)
+        if not legal:
+            break
         features, _ = encoder_fn(state)
         action = agent.act(env, state)
         search = agent.last_search
