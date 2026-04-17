@@ -260,6 +260,12 @@ def train(
     stop_requires_consecutive: int = typer.Option(
         1, help="[az] consecutive above-threshold baseline evals required to stop."
     ),
+    stop_on_baseline_pvalue: float = typer.Option(
+        0.0,
+        help="[az] stop when one-sided binomial p-value of baseline-ckpt eval "
+        "(H0: true_winrate=0.5) <= this. 0 = disabled. Recommended: 0.05 with "
+        "--baseline-ckpt-games 40 for honest evidence-based stopping.",
+    ),
     seed: int = typer.Option(0, help="Trainer RNG seed."),
 ) -> None:
     """Launch a training run as a detached subprocess and return immediately."""
@@ -327,6 +333,8 @@ def train(
             str(stop_on_baseline_win_rate),
             "--stop-requires-consecutive",
             str(stop_requires_consecutive),
+            "--stop-on-baseline-pvalue",
+            str(stop_on_baseline_pvalue),
         ]
         if resume_from:
             trainer_args += ["--resume-from", resume_from]
@@ -355,6 +363,7 @@ def train(
                 "baseline_ckpt_games": baseline_ckpt_games,
                 "stop_on_baseline_win_rate": stop_on_baseline_win_rate,
                 "stop_requires_consecutive": stop_requires_consecutive,
+                "stop_on_baseline_pvalue": stop_on_baseline_pvalue,
             }
         )
 

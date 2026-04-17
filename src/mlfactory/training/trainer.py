@@ -22,12 +22,14 @@ Design decisions locked:
 from __future__ import annotations
 
 import argparse
+import math
 import random
 import signal
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -112,8 +114,21 @@ class TrainerConfig:
     # `stop_on_baseline_win_rate` for `stop_requires_consecutive` consecutive
     # baseline evals, exit gracefully (status=finished) before hitting iters.
     # 0 or unset disables.
+    #
+    # Note: this is a fixed-threshold rule. Run51 demonstrated empirically
+    # that with 20-game evals it false-triggered on a model that was
+    # actually parity (true win rate ~50%, observed 60% by chance). For
+    # honest evidence-of-strength stopping, prefer stop_on_baseline_pvalue.
     stop_on_baseline_win_rate: float = 0.0
     stop_requires_consecutive: int = 1
+    # Stricter stop rule: stop when the one-sided binomial test against
+    # H0: true_win_rate=0.5 (using draws as 0.5 wins each — the standard
+    # win-draw-loss scoring) yields a p-value <= this threshold.
+    # Combines wins + 0.5*draws as the "score" and tests via normal
+    # approximation (large N) or exact binomial for small N.
+    # 0 or unset disables. 0.05 is a reasonable default; 0.01 is strict.
+    # Recommended: pair with --baseline-ckpt-games 40 for fair power.
+    stop_on_baseline_pvalue: float = 0.0
 
 
 # --- Main -----------------------------------------------------------------
@@ -235,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
             "baseline_ckpt_games": cfg.baseline_ckpt_games,
             "stop_on_baseline_win_rate": cfg.stop_on_baseline_win_rate,
             "stop_requires_consecutive": cfg.stop_requires_consecutive,
+            "stop_on_baseline_pvalue": cfg.stop_on_baseline_pvalue,
         },
     )
     if cfg.resume_from:
@@ -357,7 +373,7 @@ def main(argv: list[str] | None = None) -> int:
 
             # ---------------- 4) EVAL ----------------
             ev_t0 = time.monotonic()
-            baseline_score = _run_eval(
+            baseline_summary = _run_eval(
                 env=env,
                 game_name=game_name,
                 encoder=encoder,
@@ -378,11 +394,12 @@ def main(argv: list[str] | None = None) -> int:
                 msg=f"eval iter {it} completed in {ev_elapsed:.1f}s",
             )
 
-            # Early-stop rule: if baseline-win-rate threshold crossed
-            # `stop_requires_consecutive` times in a row, mark completion.
-            if baseline_score is not None and cfg.stop_on_baseline_win_rate > 0.0:
-                last_baseline_score = baseline_score
-                if baseline_score >= cfg.stop_on_baseline_win_rate:
+            # Early-stop rule 1 (legacy): fixed-threshold + consecutive count.
+            # Run51 demonstrated this false-triggers on noise; prefer the
+            # p-value rule below for new runs.
+            if baseline_summary is not None and cfg.stop_on_baseline_win_rate > 0.0:
+                last_baseline_score = baseline_summary.score
+                if baseline_summary.score >= cfg.stop_on_baseline_win_rate:
                     consecutive_baseline_hits += 1
                 else:
                     consecutive_baseline_hits = 0
@@ -392,10 +409,46 @@ def main(argv: list[str] | None = None) -> int:
                         "log",
                         level="info",
                         msg=(
-                            f"early stop: baseline win rate >= "
+                            f"early stop (winrate rule): baseline win rate >= "
                             f"{cfg.stop_on_baseline_win_rate} for "
                             f"{consecutive_baseline_hits} consecutive evals "
-                            f"(latest score={baseline_score:.3f})"
+                            f"(latest score={baseline_summary.score:.3f})"
+                        ),
+                    )
+                    early_stop_hit = True
+
+            # Early-stop rule 2 (statistical): one-sided binomial p-value
+            # against H0: true_winrate=0.5. Stops only when the observation
+            # is significantly inconsistent with parity. Single-trigger;
+            # the threshold itself does the work that "consecutive" did
+            # for the loose rule.
+            if baseline_summary is not None and cfg.stop_on_baseline_pvalue > 0.0:
+                pval = _binomial_p_value_one_sided(
+                    baseline_summary.wins,
+                    baseline_summary.draws,
+                    baseline_summary.losses,
+                )
+                # Always emit the diagnostic so the watcher can see it.
+                write_event(
+                    layout.events_path,
+                    "log",
+                    level="info",
+                    msg=(
+                        f"baseline p-value: p={pval:.4f} "
+                        f"(wins={baseline_summary.wins}, draws={baseline_summary.draws}, "
+                        f"losses={baseline_summary.losses}, threshold={cfg.stop_on_baseline_pvalue})"
+                    ),
+                )
+                if pval <= cfg.stop_on_baseline_pvalue:
+                    write_event(
+                        layout.events_path,
+                        "log",
+                        level="info",
+                        msg=(
+                            f"early stop (pvalue rule): one-sided binomial "
+                            f"p={pval:.4f} <= {cfg.stop_on_baseline_pvalue} "
+                            f"(score={baseline_summary.score:.3f}, "
+                            f"n={baseline_summary.total})"
                         ),
                     )
                     early_stop_hit = True
@@ -517,6 +570,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Number of consecutive baseline evals that must meet the "
         "stop-on-baseline-win-rate threshold before stopping.",
     )
+    p.add_argument(
+        "--stop-on-baseline-pvalue",
+        type=float,
+        default=0.0,
+        help="If >0, stop training when one-sided binomial p-value vs "
+        "H0:p=0.5 on the baseline-ckpt eval is <= this. 0.05 standard, "
+        "0.01 strict. Pair with --baseline-ckpt-games >= 40 for power.",
+    )
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args(argv)
 
@@ -553,6 +614,7 @@ def _build_config(args: argparse.Namespace) -> TrainerConfig:
         baseline_ckpt_games=args.baseline_ckpt_games,
         stop_on_baseline_win_rate=args.stop_on_baseline_win_rate,
         stop_requires_consecutive=args.stop_requires_consecutive,
+        stop_on_baseline_pvalue=args.stop_on_baseline_pvalue,
     )
 
 
@@ -764,7 +826,7 @@ def _run_eval(
     layout: RunLayout,
     baseline_net: AlphaZeroNet | None = None,
     baseline_tag: str = "baseline",
-) -> float | None:
+) -> EvalSummary | None:
     """Evaluate vs prev checkpoint and (periodically) vs mcts baseline + random
     + optional fixed baseline-ckpt.
 
@@ -806,9 +868,9 @@ def _run_eval(
         )
 
     # --- Eval vs fixed baseline checkpoint (cadence-gated) ---
-    baseline_score: float | None = None
+    baseline_summary: EvalSummary | None = None
     if baseline_net is not None and (iter_index == 1 or iter_index % cfg.baseline_ckpt_every == 0):
-        baseline_score = _eval_match_parallel(
+        baseline_summary = _eval_match_parallel(
             env=env,
             game_name=game_name,
             encoder=encoder,
@@ -870,7 +932,7 @@ def _run_eval(
             layout=layout,
         )
 
-    return baseline_score
+    return baseline_summary
 
 
 def _eval_match_parallel(
@@ -889,11 +951,12 @@ def _eval_match_parallel(
     iter_index: int,
     seed_base: int,
     layout: RunLayout,
-) -> float | None:
+) -> EvalSummary | None:
     """Run one colour-balanced eval match, parallel if n_workers>1, sequential otherwise.
 
-    Emits a single 'eval' event with aggregated results and returns the
-    win-rate (wins / total) for convenience, or None if no games were played.
+    Emits a single 'eval' event with aggregated results and returns an
+    EvalSummary (wins, losses, draws) so callers can do statistical
+    reasoning beyond raw win rate. Returns None if no games were played.
     """
     # Colour-balanced assignment: games alternate a-as-player-0 / a-as-player-1.
     a_is_p0 = [i % 2 == 0 for i in range(n_games)]
@@ -956,11 +1019,71 @@ def _eval_match_parallel(
         games=total,
         score=round(score, 3),
     )
-    return score if total > 0 else None
+    return EvalSummary(wins=wins, losses=losses, draws=draws) if total > 0 else None
+
+
+class EvalSummary(NamedTuple):
+    """Aggregated result of one eval match. Returned by _eval_match_parallel
+    so callers can do statistical reasoning beyond raw win rate."""
+
+    wins: int
+    losses: int
+    draws: int
+
+    @property
+    def total(self) -> int:
+        return self.wins + self.losses + self.draws
+
+    @property
+    def score(self) -> float:
+        return self.wins / max(self.total, 1)
 
 
 def _is_stop_requested() -> bool:
     return _stop_requested
+
+
+def _binomial_p_value_one_sided(wins: int, draws: int, losses: int) -> float:
+    """One-sided binomial test against H0: true win rate = 0.5.
+
+    Uses standard win-draw-loss scoring where each draw counts as 0.5
+    points. We round the score to the nearest half-integer of "successes"
+    out of total games and compute P(X >= observed | p=0.5) under
+    Binomial(n, 0.5).
+
+    Edge cases:
+      - 0 games -> p=1.0 (no evidence)
+      - score == n -> p = 0.5^n (all wins, exact)
+      - score <= n/2 -> p = 1.0 (no evidence of strength above 50%)
+
+    Returns p in [0, 1]. Lower = stronger evidence the model exceeds 0.5.
+    """
+    n = wins + draws + losses
+    if n == 0:
+        return 1.0
+    # Score in points; treat each draw as 0.5
+    score = wins + 0.5 * draws
+    # Convert to integer "successes" by rounding up — half-points become
+    # the conservative (closer-to-null) integer when ambiguous, so we
+    # never overstate evidence. With even draws this is exact.
+    # Equivalent: k = ceil(score). If score is exact integer, use it.
+    if abs(score - round(score)) < 1e-9:
+        k = int(round(score))
+    else:
+        # Unusual: odd number of draws. Round DOWN (toward null) for
+        # conservatism; we'd rather under-report evidence than over-report.
+        k = int(math.floor(score))
+    if k <= n / 2:
+        return 1.0
+    # P(X >= k | p=0.5) = sum_{i=k..n} C(n,i) * 0.5^n
+    # Equivalently 0.5^n * sum_{i=k..n} C(n,i)
+    log_half_n = n * math.log(0.5)
+    # Compute log of sum of binomials for numerical stability with large n
+    # but n is small here (40-100), exact arithmetic is fine
+    total = 0
+    for i in range(k, n + 1):
+        total += math.comb(n, i)
+    return total * (0.5**n)
 
 
 if __name__ == "__main__":
