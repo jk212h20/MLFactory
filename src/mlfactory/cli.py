@@ -187,6 +187,7 @@ def match(
 TRAINERS: dict[str, str] = {
     "dummy": "mlfactory.runner.dummy_trainer",
     "alphazero": "mlfactory.training.trainer",
+    "alphazero_mandala": "mlfactory.training.trainer_mandala",
 }
 
 
@@ -370,6 +371,107 @@ def train(
     pid = launch_run(
         layout,
         trainer_module=TRAINERS[trainer],
+        trainer_args=trainer_args,
+        config_summary=config_summary,
+    )
+    console.print(f"[green]started[/green] run [bold]{run_id}[/bold] (pid {pid})")
+    console.print(f"  dir:   {layout.dir}")
+    console.print(f"  watch: [cyan]mlfactory watch {run_id}[/cyan]")
+    console.print(f"  stop:  [cyan]mlfactory stop {run_id}[/cyan]")
+    console.print(f"  tail:  [dim]tail -f {layout.log_path}[/dim]")
+
+
+@app.command("train-mandala")
+def train_mandala(
+    name: str = typer.Option("", help="Optional human label appended to run id."),
+    iters: int = typer.Option(5, help="Number of training iterations."),
+    selfplay_games: int = typer.Option(20, help="Self-play games per iteration."),
+    selfplay_sims: int = typer.Option(50, help="PUCT sims per move in self-play."),
+    eval_games: int = typer.Option(10, help="Games per eval match."),
+    eval_sims: int = typer.Option(50, help="PUCT sims per move in eval."),
+    train_batches: int = typer.Option(100, help="Training minibatches per iter."),
+    batch_size: int = typer.Option(128, help="Training batch size."),
+    lr: float = typer.Option(1e-3, help="Learning rate."),
+    warmup_samples: int = typer.Option(256, help="Min buffer size before training."),
+    hidden: int = typer.Option(256, help="MLP hidden width."),
+    n_blocks: int = typer.Option(4, help="MLP residual block count."),
+    value_hidden: int = typer.Option(128, help="Value head hidden width."),
+    device: str = typer.Option("mps", help="Training device."),
+    samples_per_iter: int = typer.Option(2, help="Self-play games saved per iter."),
+    resume_from: str = typer.Option("", help="Checkpoint path to warm-start from."),
+    baseline_ckpt: str = typer.Option("", help="Fixed baseline checkpoint for periodic eval."),
+    baseline_ckpt_every: int = typer.Option(5, help="Iters between baseline evals."),
+    baseline_ckpt_games: int = typer.Option(20, help="Games per baseline eval match."),
+    stop_on_baseline_pvalue: float = typer.Option(
+        0.0, help="Early-stop when baseline eval p-value <= this. 0 = disabled."
+    ),
+    seed: int = typer.Option(0, help="RNG seed."),
+) -> None:
+    """Launch a Mandala training run as a detached subprocess."""
+    game = "mandala"
+    root = _workspace_root()
+    run_id = new_run_id(name or "alphazero_mandala")
+    layout = RunLayout(root=root, game=game, run_id=run_id)
+
+    trainer_args: list[str] = [
+        "--iters",
+        str(iters),
+        "--selfplay-games",
+        str(selfplay_games),
+        "--selfplay-sims",
+        str(selfplay_sims),
+        "--eval-games",
+        str(eval_games),
+        "--eval-sims",
+        str(eval_sims),
+        "--train-batches",
+        str(train_batches),
+        "--batch-size",
+        str(batch_size),
+        "--lr",
+        str(lr),
+        "--warmup-samples",
+        str(warmup_samples),
+        "--hidden",
+        str(hidden),
+        "--n-blocks",
+        str(n_blocks),
+        "--value-hidden",
+        str(value_hidden),
+        "--device",
+        device,
+        "--samples-per-iter",
+        str(samples_per_iter),
+        "--baseline-ckpt-every",
+        str(baseline_ckpt_every),
+        "--baseline-ckpt-games",
+        str(baseline_ckpt_games),
+        "--stop-on-baseline-pvalue",
+        str(stop_on_baseline_pvalue),
+        "--seed",
+        str(seed),
+    ]
+    if resume_from:
+        trainer_args += ["--resume-from", resume_from]
+    if baseline_ckpt:
+        trainer_args += ["--baseline-ckpt", baseline_ckpt]
+
+    config_summary = {
+        "trainer": "alphazero_mandala",
+        "game": game,
+        "iters": iters,
+        "selfplay_games": selfplay_games,
+        "selfplay_sims": selfplay_sims,
+        "lr": lr,
+        "hidden": hidden,
+        "n_blocks": n_blocks,
+        "resume_from": resume_from or None,
+        "baseline_ckpt": baseline_ckpt or None,
+    }
+
+    pid = launch_run(
+        layout,
+        trainer_module="mlfactory.training.trainer_mandala",
         trainer_args=trainer_args,
         config_summary=config_summary,
     )
