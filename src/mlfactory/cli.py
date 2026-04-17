@@ -528,6 +528,50 @@ def watch_cmd(
     watch_run(layout, refresh_hz=refresh)
 
 
+@app.command("watch-active")
+def watch_active_cmd(
+    game: str = typer.Option("", help="Optionally filter by game."),
+    refresh: float = typer.Option(4.0, help="Refresh Hz."),
+) -> None:
+    """Attach the watch TUI to the currently-running training run.
+
+    Finds the newest run (by run_id timestamp) whose process is still
+    alive. If several are alive, lists them and attaches to the newest.
+    Exits with an error if none are alive.
+
+    This is the "I don't want to type the run id" command: just
+    `mlfactory watch-active` and it does the right thing.
+    """
+    root = _workspace_root()
+    runs = list_runs(root, game=game or None)
+    if not runs:
+        console.print("[dim]no runs found under experiments/[/dim]")
+        raise typer.Exit(code=1)
+
+    alive_runs = [r for r in runs if run_is_alive(r)]
+    if not alive_runs:
+        console.print("[yellow]no alive runs[/yellow]")
+        # Helpful: show the most recent finished/crashed run so the user
+        # knows where to look next.
+        runs_sorted = sorted(runs, key=lambda r: r.run_id, reverse=True)
+        most_recent = runs_sorted[0]
+        console.print(
+            f"  (most recent: [bold]{most_recent.run_id}[/bold] "
+            f"status=[bold]{most_recent.read_status()}[/bold])"
+        )
+        console.print(f"  watch it explicitly: [cyan]mlfactory watch {most_recent.run_id}[/cyan]")
+        raise typer.Exit(code=1)
+
+    alive_runs.sort(key=lambda r: r.run_id, reverse=True)
+    if len(alive_runs) > 1:
+        console.print(f"[dim]{len(alive_runs)} alive runs:[/dim]")
+        for r in alive_runs:
+            console.print(f"  [cyan]{r.run_id}[/cyan]  [dim]({r.game})[/dim]")
+        console.print(f"[dim]attaching to newest: {alive_runs[0].run_id}[/dim]\n")
+
+    watch_run(alive_runs[0], refresh_hz=refresh)
+
+
 @app.command("stop")
 def stop_cmd(
     run_id: str = typer.Argument(..., help="Run id (or trailing slug)."),
