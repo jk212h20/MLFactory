@@ -578,14 +578,25 @@ def _play_one_game(
     iter_index: int,
     game_index: int,
     seed: int,
+    start_state: MandalaState | None = None,
+    kind: str = "selfplay",
 ) -> dict:
     """Play one self-play game. Generic shape matches
     training.selfplay.play_selfplay_game but tailored for Mandala (dict
-    state, player-view encoding, imperfect-info)."""
+    state, player-view encoding, imperfect-info).
+
+    `start_state` lets us begin from a non-initial state, used by the
+    endgame-branching path: take a real position from a natural game,
+    fork it, play different completions to get high-signal training
+    samples near terminal. If None, env.initial_state() is used.
+
+    `kind` is recorded into the GameRecord.notes for downstream filtering
+    ('selfplay' = natural, 'branch' = endgame branching).
+    """
     from mlfactory.training.replay_buffer import Sample
 
     agent.reset()
-    state = env.initial_state()
+    state = start_state if start_state is not None else env.initial_state()
 
     # Collect per-move training data.
     per_move_features: list[np.ndarray] = []
