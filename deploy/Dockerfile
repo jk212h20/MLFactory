@@ -37,7 +37,7 @@ RUN uv pip install --system --no-cache --python $(which python3) \
 # Ship the checkpoint in the image.
 COPY deploy/checkpoints /app/checkpoints
 
-ENV AZ_CHECKPOINT=/app/checkpoints/boop-run50-iter50.pt \
+ENV AZ_CHECKPOINT=/app/checkpoints/boop-run52-iter15.pt \
     AZ_DEFAULT_SIMS=200 \
     PYTHONUNBUFFERED=1 \
     LOG_LEVEL=INFO
