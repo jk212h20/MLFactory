@@ -225,18 +225,44 @@ def move(req: MoveRequest) -> MoveResponse:
 
     wire = action_to_wire(action)
     root_value = None
+    top_visits_str = ""
     if agent.last_search is not None:
         root_value = float(agent.last_search.root_value)
+        # Top 5 most-visited actions, for debugging questionable picks.
+        tv = sorted(agent.last_search.root_visits.items(), key=lambda kv: -kv[1])[:5]
+        top_visits_str = " ".join(f"a{a}:{n}" for a, n in tv)
+
+    # Dump a short text rendering of the board so we can inspect
+    # suspicious moves post-hoc from the logs. Piece glyphs:
+    #   . = empty, o = orange kitten, O = orange cat,
+    #   g = gray kitten, G = gray cat.
+    from mlfactory.games.boop.rules import EMPTY, G_CAT, G_KITTEN, O_CAT, O_KITTEN
+
+    glyph = {EMPTY: ".", O_KITTEN: "o", O_CAT: "O", G_KITTEN: "g", G_CAT: "G"}
+    board_lines = []
+    for r in range(6):
+        row_str = " ".join(glyph.get(boop_state.board[r * 6 + c], "?") for c in range(6))
+        board_lines.append(row_str)
+    board_render = "/".join(board_lines)
+    pool_str = (
+        f"Ok={boop_state.orange_pool[0]}c={boop_state.orange_pool[1]}r={boop_state.orange_pool[2]} "
+        f"Gk={boop_state.gray_pool[0]}c={boop_state.gray_pool[1]}r={boop_state.gray_pool[2]}"
+    )
 
     log.info(
-        "move color=%s phase=%s sims=%d latency=%dms action=%d wire=%s rv=%s",
+        "move color=%s to_play=%d phase=%s sims=%d latency=%dms action=%d wire=%s rv=%s "
+        "top=[%s] pools=[%s] board=[%s]",
         req.color,
+        boop_state.to_play,
         boop_state.phase,
         sims,
         latency_ms,
         action,
         wire,
         root_value,
+        top_visits_str,
+        pool_str,
+        board_render,
     )
 
     return MoveResponse(
