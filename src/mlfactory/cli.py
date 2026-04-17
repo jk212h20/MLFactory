@@ -237,6 +237,13 @@ def train(
     device: str = typer.Option("mps", help="[az] torch device for training (mps|cpu|cuda)."),
     samples_per_iter: int = typer.Option(2, help="[az] self-play games saved per iteration."),
     no_augment: bool = typer.Option(False, help="[az] disable D4 symmetry augmentation."),
+    n_workers: int = typer.Option(
+        1, help="[az] worker processes for self-play/eval parallelism (1 = sequential)."
+    ),
+    mcts_eval_every: int = typer.Option(1, help="[az] run the mcts baseline eval every N iters."),
+    random_eval_every: int = typer.Option(
+        1, help="[az] run the random baseline eval every N iters."
+    ),
     seed: int = typer.Option(0, help="Trainer RNG seed."),
 ) -> None:
     """Launch a training run as a detached subprocess and return immediately."""
@@ -289,6 +296,14 @@ def train(
         ]
         if no_augment:
             trainer_args.append("--no-augment")
+        trainer_args += [
+            "--n-workers",
+            str(n_workers),
+            "--mcts-eval-every",
+            str(mcts_eval_every),
+            "--random-eval-every",
+            str(random_eval_every),
+        ]
         config_summary.update(
             {
                 "selfplay_games": selfplay_games,
@@ -303,6 +318,9 @@ def train(
                 "net_channels": net_channels,
                 "device": device,
                 "augment": not no_augment,
+                "n_workers": n_workers,
+                "mcts_eval_every": mcts_eval_every,
+                "random_eval_every": random_eval_every,
             }
         )
 

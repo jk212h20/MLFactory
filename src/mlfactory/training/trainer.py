@@ -42,8 +42,14 @@ from mlfactory.games.boop import Boop
 from mlfactory.games.boop.encode import encode_state, legal_mask
 from mlfactory.runner.events import write_event
 from mlfactory.runner.layout import RunLayout
-from mlfactory.tools.arena import play_match
 from mlfactory.training.augment import augment_many
+from mlfactory.training.parallel import (
+    EvalJob,
+    SelfPlayJob,
+    parallel_eval,
+    parallel_selfplay,
+    serialise_net,
+)
 from mlfactory.training.replay_buffer import ReplayBuffer
 from mlfactory.training.sample_game import write_game
 from mlfactory.training.selfplay import play_selfplay_game
@@ -86,6 +92,11 @@ class TrainerConfig:
     seed: int = 0
     # sample-game writing
     samples_per_iter: int = 2
+    # parallelism
+    n_workers: int = 1  # 1 = legacy single-process path
+    # eval cadence: how often to run the mcts baseline (every N iters)
+    mcts_eval_every: int = 1
+    random_eval_every: int = 1
 
 
 # --- Main -----------------------------------------------------------------
@@ -347,6 +358,21 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--device", default="mps")
     p.add_argument("--samples-per-iter", type=int, default=2)
     p.add_argument("--no-augment", action="store_true")
+    p.add_argument(
+        "--n-workers",
+        type=int,
+        default=1,
+        help="Worker processes for self-play/eval. 1 = single-process.",
+    )
+    p.add_argument(
+        "--mcts-eval-every",
+        type=int,
+        default=1,
+        help="Run mcts baseline eval every N iters (1 = every iter).",
+    )
+    p.add_argument(
+        "--random-eval-every", type=int, default=1, help="Run random baseline eval every N iters."
+    )
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args(argv)
 
@@ -374,6 +400,9 @@ def _build_config(args: argparse.Namespace) -> TrainerConfig:
         augment=not args.no_augment,
         seed=args.seed,
         samples_per_iter=args.samples_per_iter,
+        n_workers=args.n_workers,
+        mcts_eval_every=args.mcts_eval_every,
+        random_eval_every=args.random_eval_every,
     )
 
 
@@ -477,7 +506,10 @@ def _run_selfplay(
     layout: RunLayout,
     game_name: str,
 ):
-    """Play selfplay_games games, extract samples, save a few for replay."""
+    """Play selfplay_games games, extract samples, save a few for replay.
+
+    With n_workers > 1, games run in parallel worker processes.
+    """
     samples_acc = []
     record_paths: list[Path] = []
     total_moves = 0
@@ -487,32 +519,64 @@ def _run_selfplay(
     iter_samples_dir = layout.samples_dir / f"iter-{iter_index:04d}"
     iter_samples_dir.mkdir(parents=True, exist_ok=True)
 
-    for g in range(cfg.selfplay_games):
-        if _stop_requested:
-            break
-        agent = _make_selfplay_agent(net, encoder, cfg, seed=seed + g)
-        result = play_selfplay_game(
-            env,
-            agent,
-            encoder=encoder,
-            game_name=game_name,
-            iter_index=iter_index,
-            seed=seed + g,
-            game_index=g,
-        )
+    if cfg.n_workers > 1:
+        net_bytes, net_cfg = serialise_net(net)
+        jobs = [
+            SelfPlayJob(
+                game_name=game_name,
+                net_state_dict_bytes=net_bytes,
+                net_config_dict=net_cfg,
+                n_simulations=cfg.selfplay_sims,
+                dirichlet_alpha=cfg.dirichlet_alpha,
+                dirichlet_epsilon=cfg.dirichlet_epsilon,
+                temperature=1.0,
+                temperature_moves=cfg.temperature_moves,
+                add_root_noise=True,
+                iter_index=iter_index,
+                game_index=g,
+                seed=seed + g,
+                max_moves=500,
+                record_visits=True,
+            )
+            for g in range(cfg.selfplay_games)
+        ]
+        results = parallel_selfplay(jobs, n_workers=cfg.n_workers)
+    else:
+        results = []
+        for g in range(cfg.selfplay_games):
+            if _stop_requested:
+                break
+            agent = _make_selfplay_agent(net, encoder, cfg, seed=seed + g)
+            results.append(
+                play_selfplay_game(
+                    env,
+                    agent,
+                    encoder=encoder,
+                    game_name=game_name,
+                    iter_index=iter_index,
+                    seed=seed + g,
+                    game_index=g,
+                )
+            )
+
+    # Sort by game_index so sample-game indices are stable.
+    results.sort(key=lambda r: r.record.notes.get("game_index", 0))
+
+    for result in results:
         samples_acc.extend(result.samples)
         total_moves += result.n_moves
         if result.winner is not None:
             n_decided += 1
             if result.winner == 0:
                 orange_wins += 1
-
+        g = int(result.record.notes.get("game_index", 0))
         if g < cfg.samples_per_iter:
             path = iter_samples_dir / f"selfplay-game-{g:02d}.json"
             write_game(path, env=env, record=result.record)
             record_paths.append(path)
 
-    avg_moves = total_moves / max(cfg.selfplay_games, 1)
+    n_games_completed = len(results)
+    avg_moves = total_moves / max(n_games_completed, 1)
     orange_rate = orange_wins / max(n_decided, 1)
     return (
         samples_acc,
@@ -520,6 +584,7 @@ def _run_selfplay(
         {
             "avg_moves": avg_moves,
             "orange_win_rate": orange_rate,
+            "games_completed": n_games_completed,
         },
     )
 
@@ -548,27 +613,34 @@ def _run_eval(
     seed: int,
     layout: RunLayout,
 ) -> None:
-    """Evaluate vs prev checkpoint and vs a fixed mcts baseline."""
-    cur_agent_name = f"az-it{iter_index}"
-    cur_agent = _make_eval_agent(net, encoder, cfg, seed=seed, name=cur_agent_name)
+    """Evaluate vs prev checkpoint and (periodically) vs mcts baseline + random.
 
+    With n_workers > 1, each eval match's games run in parallel.
+    Cadence: `mcts_eval_every`, `random_eval_every` control how often the
+    fixed baselines run (always on iter 1 and on multiples of the cadence).
+    """
     iter_samples_dir = layout.samples_dir / f"iter-{iter_index:04d}"
     iter_samples_dir.mkdir(parents=True, exist_ok=True)
 
-    # Eval vs prev
+    # --- Eval vs prev (cheap AZ-vs-AZ, every iter) ---
     if prev_net is not None:
-        prev_agent = _make_eval_agent(prev_net, encoder, cfg, seed=seed + 1, name="az-prev")
-        _eval_pair(
-            env,
-            cur_agent,
-            prev_agent,
-            n_games=cfg.eval_games,
+        _eval_match_parallel(
+            env=env,
+            game_name=game_name,
+            encoder=encoder,
+            net=net,
+            cfg=cfg,
+            opponent_kind="az",
+            opp_net=prev_net,
+            opp_sims=cfg.eval_sims,
+            opp_name="az-prev",
             tag="prev",
+            n_games=cfg.eval_games,
             iter_index=iter_index,
+            seed_base=seed,
             layout=layout,
         )
     else:
-        # First iter: nothing to compare against.
         write_event(
             layout.events_path,
             "log",
@@ -576,57 +648,132 @@ def _run_eval(
             msg=f"skipping eval-vs-prev at iter {iter_index} (no previous net)",
         )
 
-    # Eval vs fixed MCTS baseline.
-    baseline = MCTSAgent(
-        n_simulations=cfg.baseline_mcts_sims,
-        seed=seed + 2,
-        name=f"mcts{cfg.baseline_mcts_sims}",
-    )
-    _eval_pair(
-        env,
-        cur_agent,
-        baseline,
-        n_games=cfg.eval_games,
-        tag=f"mcts{cfg.baseline_mcts_sims}",
-        iter_index=iter_index,
-        layout=layout,
-    )
+    # --- Eval vs MCTS baseline (cadence-gated) ---
+    if iter_index == 1 or iter_index % cfg.mcts_eval_every == 0:
+        _eval_match_parallel(
+            env=env,
+            game_name=game_name,
+            encoder=encoder,
+            net=net,
+            cfg=cfg,
+            opponent_kind="mcts",
+            opp_net=None,
+            opp_sims=cfg.baseline_mcts_sims,
+            opp_name=f"mcts{cfg.baseline_mcts_sims}",
+            tag=f"mcts{cfg.baseline_mcts_sims}",
+            n_games=cfg.eval_games,
+            iter_index=iter_index,
+            seed_base=seed + 100,
+            layout=layout,
+        )
+    else:
+        write_event(
+            layout.events_path,
+            "log",
+            level="info",
+            msg=f"skipping mcts eval at iter {iter_index} (every {cfg.mcts_eval_every})",
+        )
 
-    # Eval vs random (fast sanity).
-    rnd = RandomAgent(name="random", seed=seed + 3)
-    _eval_pair(
-        env,
-        cur_agent,
-        rnd,
-        n_games=max(cfg.eval_games // 2, 6),
-        tag="random",
-        iter_index=iter_index,
-        layout=layout,
-    )
+    # --- Eval vs random (cheap sanity, cadence-gated) ---
+    if iter_index == 1 or iter_index % cfg.random_eval_every == 0:
+        _eval_match_parallel(
+            env=env,
+            game_name=game_name,
+            encoder=encoder,
+            net=net,
+            cfg=cfg,
+            opponent_kind="random",
+            opp_net=None,
+            opp_sims=None,
+            opp_name="random",
+            tag="random",
+            n_games=max(cfg.eval_games // 2, 6),
+            iter_index=iter_index,
+            seed_base=seed + 200,
+            layout=layout,
+        )
 
 
-def _eval_pair(
-    env,
-    a,
-    b,
+def _eval_match_parallel(
     *,
-    n_games: int,
+    env,
+    game_name: str,
+    encoder,
+    net: AlphaZeroNet,
+    cfg: TrainerConfig,
+    opponent_kind: str,
+    opp_net: AlphaZeroNet | None,
+    opp_sims: int | None,
+    opp_name: str,
     tag: str,
+    n_games: int,
     iter_index: int,
+    seed_base: int,
     layout: RunLayout,
 ) -> None:
-    result = play_match(env, a, b, n_games=n_games, should_stop=_is_stop_requested)
-    total = result.a_wins + result.b_wins + result.draws
+    """Run one colour-balanced eval match, parallel if n_workers>1, sequential otherwise.
+
+    Emits a single 'eval' event with aggregated results.
+    """
+    # Colour-balanced assignment: games alternate a-as-player-0 / a-as-player-1.
+    a_is_p0 = [i % 2 == 0 for i in range(n_games)]
+
+    if cfg.n_workers > 1:
+        a_bytes, a_cfg = serialise_net(net)
+        b_bytes = b_cfg = None
+        if opp_net is not None:
+            b_bytes, b_cfg = serialise_net(opp_net)
+        jobs = [
+            EvalJob(
+                game_name=game_name,
+                a_net_state_dict_bytes=a_bytes,
+                a_net_config_dict=a_cfg,
+                a_sims=cfg.eval_sims,
+                a_temperature_moves=4,
+                a_name=f"az-it{iter_index}",
+                a_seed=seed_base + i,
+                opponent_kind=opponent_kind,  # type: ignore[arg-type]
+                b_net_state_dict_bytes=b_bytes,
+                b_net_config_dict=b_cfg,
+                b_sims=opp_sims,
+                b_name=opp_name,
+                b_seed=seed_base + 1000 + i,
+                a_is_player_0=a_is_p0[i],
+            )
+            for i in range(n_games)
+        ]
+        game_results = parallel_eval(jobs, n_workers=cfg.n_workers, should_stop=_is_stop_requested)
+        wins = sum(1 for r in game_results if r.a_won)
+        losses = sum(1 for r in game_results if r.b_won)
+        draws = sum(1 for r in game_results if r.drew)
+        total = wins + losses + draws
+    else:
+        # Sequential fallback — delegate to the original play_match.
+        cur_agent = _make_eval_agent(net, encoder, cfg, seed=seed_base, name=f"az-it{iter_index}")
+        if opponent_kind == "az":
+            assert opp_net is not None
+            opp_agent = _make_eval_agent(opp_net, encoder, cfg, seed=seed_base + 1, name=opp_name)
+        elif opponent_kind == "mcts":
+            assert opp_sims is not None
+            opp_agent = MCTSAgent(n_simulations=opp_sims, seed=seed_base + 1, name=opp_name)
+        else:  # random
+            opp_agent = RandomAgent(name=opp_name, seed=seed_base + 1)
+        from mlfactory.tools.arena import play_match
+
+        r = play_match(env, cur_agent, opp_agent, n_games=n_games, should_stop=_is_stop_requested)
+        wins, losses, draws = int(r.a_wins), int(r.b_wins), int(r.draws)
+        total = wins + losses + draws
+
     write_event(
         layout.events_path,
         "eval",
         iter=iter_index,
         opponent=tag,
-        wins=int(result.a_wins),
-        losses=int(result.b_wins),
-        draws=int(result.draws),
-        games=total,  # may be < n_games if stop requested mid-match
-        score=round(result.a_wins / max(total, 1), 3),
+        wins=wins,
+        losses=losses,
+        draws=draws,
+        games=total,
+        score=round(wins / max(total, 1), 3),
     )
 
 
