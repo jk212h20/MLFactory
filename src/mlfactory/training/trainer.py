@@ -443,6 +443,13 @@ def _make_selfplay_agent(
 def _make_eval_agent(
     net: AlphaZeroNet, encoder, cfg: TrainerConfig, seed: int, name: str
 ) -> AlphaZeroAgent:
+    """Eval agent: sample-mode with low temperature for first few moves then greedy.
+
+    A fully-deterministic greedy-vs-greedy matchup can loop forever on games
+    without repetition rules (like Boop), because the net + greedy selection
+    is a pure function of state. A small amount of early-game sampling both
+    breaks cycles and produces meaningful variance across the 10 eval games.
+    """
     cpu_net = AlphaZeroNet(net.config)
     cpu_net.load_state_dict(net.state_dict())
     cpu_net = cpu_net.cpu().eval()
@@ -450,7 +457,9 @@ def _make_eval_agent(
     return AlphaZeroAgent(
         ev,
         PUCTConfig(n_simulations=cfg.eval_sims),
-        mode="greedy",
+        mode="sample",
+        temperature=1.0,
+        temperature_moves=4,  # first 4 moves sampled, then greedy
         add_root_noise=False,
         seed=seed,
         name=name,

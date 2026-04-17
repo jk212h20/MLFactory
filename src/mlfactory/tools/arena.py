@@ -85,15 +85,28 @@ class PairwiseResult:
         return (max(0.0, centre - half), min(1.0, centre + half))
 
 
-def play_game(env: Env, agent_0: Agent, agent_1: Agent) -> tuple[int | None, int]:
-    """Play one game. Returns (winner_player_index | None, moves_played)."""
+def play_game(
+    env: Env,
+    agent_0: Agent,
+    agent_1: Agent,
+    *,
+    move_cap: int | None = None,
+) -> tuple[int | None, int]:
+    """Play one game. Returns (winner_player_index | None, moves_played).
+
+    `move_cap` caps the game length to guard against infinite loops (e.g.,
+    two deterministic neural agents cycling through states in a game with
+    no repetition rule like Boop). Games that hit the cap are treated as
+    draws. Default is a game-specific sensible ceiling: 300 moves for
+    Boop (typical games are 30-80 moves), else num_actions * 100.
+    """
     agent_0.reset()
     agent_1.reset()
     state: State = env.initial_state()
     agents = (agent_0, agent_1)
     moves = 0
-    # Move cap to prevent infinite games from bugs (Connect 4 max = 42).
-    move_cap = env.num_actions * 100
+    if move_cap is None:
+        move_cap = 300 if getattr(env, "name", "") == "boop" else env.num_actions * 100
     while not state.is_terminal and moves < move_cap:
         a = agents[state.to_play].act(env, state)
         state = env.step(state, a)
