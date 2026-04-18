@@ -63,6 +63,7 @@ class PIMCMandalaAgent:
         rollout_policy: str = "random",
         mode: str = "greedy",
         sample_temperature: float = 1.0,
+        temperature_moves: int = 0,
         seed: int | None = None,
         name: str | None = None,
     ) -> None:
@@ -74,6 +75,11 @@ class PIMCMandalaAgent:
         self.rollout_policy = rollout_policy
         self.mode = mode
         self.sample_temperature = sample_temperature
+        # If mode='sample', sample for the first `temperature_moves` plies of
+        # each game then switch to greedy (mirrors AlphaZeroAgent semantics).
+        # Set to 0 to always use the configured mode.
+        self.temperature_moves = temperature_moves
+        self._move_count = 0
         self._rng = random.Random(seed)
         # Total search budget = n_dets * sims_per_det. The name reflects this
         # for clear comparison vs HP-PUCT(n_dets * sims_per_det).
@@ -82,6 +88,7 @@ class PIMCMandalaAgent:
 
     def reset(self) -> None:
         self.last_search = None
+        self._move_count = 0
 
     def act(self, env: MandalaEnv, state: MandalaState) -> int:
         """Run root PIMC, return chosen action template index."""
@@ -152,8 +159,18 @@ class PIMCMandalaAgent:
             total_sims=self.n_determinizations * self.sims_per_det,
         )
 
-        # Choose action.
-        if self.mode == "greedy":
+        # Choose action. Honor temperature_moves: if mode='sample' but we've
+        # exceeded temperature_moves plies, switch to greedy.
+        effective_mode = self.mode
+        if (
+            self.mode == "sample"
+            and self.temperature_moves > 0
+            and self._move_count >= self.temperature_moves
+        ):
+            effective_mode = "greedy"
+        self._move_count += 1
+
+        if effective_mode == "greedy":
             return max(visits_total.items(), key=lambda kv: kv[1])[0]
         # Sample mode: visits^(1/temperature)
         actions = list(visits_total.keys())
