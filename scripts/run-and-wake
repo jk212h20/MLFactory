@@ -51,6 +51,27 @@ if [ "${1:-}" != "--" ]; then
 fi
 shift
 
+# Resolve the session to a literal ses_* id at launch time (parent shell).
+# We do this here, not in the wrapper, because the substring-search path
+# in poke-session has been observed to fail intermittently when invoked
+# from the wrapper context. Resolving up-front and passing the exact id
+# avoids that bug entirely.
+session_id=""
+if [[ "$session" == ses_* ]]; then
+  session_id="$session"
+elif [ -x "$HOME/bin/poke-session" ] || command -v poke-session >/dev/null 2>&1; then
+  # Use opencode session list directly; awk for substring match.
+  # opencode is cwd-scoped — running from a project dir only lists that
+  # project's sessions. cd to $HOME to get the global list.
+  session_id=$(cd "$HOME" && opencode session list 2>/dev/null | awk -v pat="$session" '
+    NR <= 2 { next }
+    tolower($0) ~ tolower(pat) { print $1; exit }
+  ')
+fi
+if [ -z "$session_id" ]; then
+  echo "warn: could not resolve session '$session' to an id; wakes won't fire" >&2
+fi
+
 # Build the wrapper that runs the command, then on exit pokes the session.
 # macOS mktemp requires the X-template at the END of the filename (no
 # suffix). We use a directory-prefix template; the resulting file has no
@@ -97,12 +118,23 @@ last 10 lines:
 \$summary"
 fi
 
-# Poke session
-if [ -n "$session" ]; then
+# Poke session. Use the pre-resolved session id (literal ses_*) to avoid
+# the substring-search path inside poke-session that has had reliability
+# issues from wrapper context.
+if [ -n "$session_id" ]; then
+  poke_log="$log_path.poke.log"
+  poke_bin=""
   if command -v poke-session >/dev/null 2>&1; then
-    poke-session "$session" "\$msg" >/dev/null 2>&1 || true
+    poke_bin="poke-session"
   elif [ -x "\$HOME/bin/poke-session" ]; then
-    "\$HOME/bin/poke-session" "$session" "\$msg" >/dev/null 2>&1 || true
+    poke_bin="\$HOME/bin/poke-session"
+  fi
+  if [ -n "\$poke_bin" ]; then
+    "\$poke_bin" "$session_id" "\$msg" > "\$poke_log" 2>&1
+    poke_exit=\$?
+    echo "[poke exit=\$poke_exit at \$(date '+%H:%M:%S')]" >> "\$poke_log"
+  else
+    echo "no poke-session binary found at \$(date)" > "\$poke_log"
   fi
 fi
 
@@ -116,4 +148,4 @@ nohup "$wrapper" </dev/null >/dev/null 2>&1 &
 pid=$!
 echo "started pid $pid (wrapper $wrapper)"
 echo "log: $log_path"
-echo "session: $session"
+echo "session: $session ($session_id)"
