@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# `timed`: run a command with a budget + periodic heartbeat.
+#
+# Designed for inline shell commands where I (the agent) want to:
+#   - cap the compute budget so I can't accidentally hang for many minutes
+#   - get periodic stderr heartbeats so I can see progress at a glance
+#   - have a clear "exceeded budget" signal so I notice and decide to abort
+#
+# Usage:
+#   timed <budget_seconds> <heartbeat_seconds> -- <command...>
+#
+# Examples:
+#   timed 60 5 -- uv run python -c "..."
+#   timed 300 30 -- uv run pytest tests/test_slow/
+#
+# Heartbeats include elapsed time + child PID so we can correlate logs.
+# Exit codes:
+#   - 0..N : whatever the wrapped command returned
+#   - 124  : exceeded budget (matches GNU timeout convention)
+
+set -u
+
+if [ $# -lt 4 ] || [ "$3" != "--" ]; then
+  echo "usage: timed <budget_sec> <heartbeat_sec> -- <command...>" >&2
+  exit 2
+fi
+
+budget=$1
+heartbeat=$2
+shift 3
+
+# Spawn child in its own process group so we can kill the whole tree.
+( exec "$@" ) &
+child=$!
+
+start=$(date +%s)
+deadline=$((start + budget))
+
+# Heartbeat loop.
+( while kill -0 $child 2>/dev/null; do
+    now=$(date +%s)
+    elapsed=$((now - start))
+    remaining=$((deadline - now))
+    if [ $remaining -lt 0 ]; then
+      printf '[timed] elapsed=%ds OVER BUDGET (was %ds), killing pid %d\n' \
+        "$elapsed" "$budget" "$child" >&2
+      kill -TERM $child 2>/dev/null
+      sleep 2
+      kill -KILL $child 2>/dev/null
+      exit 0
+    fi
+    printf '[timed] elapsed=%ds remaining=%ds pid=%d\n' \
+      "$elapsed" "$remaining" "$child" >&2
+    sleep "$heartbeat"
+  done ) &
+heart=$!
+
+# Wait for the child only; kill the heartbeat loop on exit.
+wait $child
+status=$?
+kill $heart 2>/dev/null || true
+wait $heart 2>/dev/null || true
+
+# If we killed it for budget overrun, propagate 124.
+end=$(date +%s)
+if [ $((end - start)) -gt $budget ] && [ $status -ne 0 ]; then
+  exit 124
+fi
+exit $status
