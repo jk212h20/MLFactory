@@ -99,6 +99,34 @@ _TURN_SCALAR_DIM = 3 + _N_COLORS + 1
 # Expected-final-score for both players: 2 scalars, normalized to ~[0, 1]
 _SCORE_DIM = 2
 
+# Committed-points-per-color, per player.
+#
+# A skilled human evaluating "what is my score right now" computes this
+# explicitly: for each color in their river slot S (0-indexed), every cup
+# card of that color is worth S+1 points. Summed over colors, this is
+# the player's CURRENT committed score (no speculation about future
+# claims). The mountain cards collected through the game and the order
+# they were collected drive this number more than the visible board.
+#
+# We expose:
+#   - committed_points_per_color: 6 scalars per player = 12. Lets the net
+#     reason about specific colors ("I have a lot of red committed").
+#   - total_committed: 1 scalar per player = 2. Aggregate.
+#   - score_margin: 1 scalar (me_total - opp_total_visible). The single
+#     most game-state-relevant scalar a strong human computes.
+# For opp, the visible-cup-only portion is computed (we hide their
+# starting cup cards). The encoder does NOT speculate about hidden cup
+# colors here — that's what expected_final_score does separately.
+_COMMITTED_PER_COLOR_DIM = 2 * _N_COLORS  # 12
+_COMMITTED_TOTAL_DIM = 2  # me, opp
+_SCORE_MARGIN_DIM = 1
+
+# Per-color SEEN counts: total cards of each color visible to me across
+# all visible zones. Complements the residual (which says how many are
+# UNSEEN); the seen count gives the net a direct view of "what's been
+# played out so far" for forward planning.
+_SEEN_COUNT_DIM = _N_COLORS  # 6
+
 # Sizes (normalized to rough ranges) for scalars the net might not derive
 # easily from zone counts:
 #   my_hand_size, opp_hand_size, deck_size, discard_size, my_cup_size,
@@ -119,6 +147,10 @@ FEATURE_DIM = (
     + _PHASE_DIM
     + _TURN_SCALAR_DIM
     + _SCORE_DIM
+    + _COMMITTED_PER_COLOR_DIM
+    + _COMMITTED_TOTAL_DIM
+    + _SCORE_MARGIN_DIM
+    + _SEEN_COUNT_DIM
     + _SIZE_SCALAR_DIM
     + _HISTORY_DIM
 )
@@ -164,6 +196,30 @@ def _river_one_hot(river: list[str | None]) -> np.ndarray:
             out[i, _N_COLORS] = 1.0
         else:
             out[i, _COLOR_IDX[color]] = 1.0
+    return out
+
+
+def committed_points_per_color(player: dict) -> np.ndarray:
+    """For each color, points already-committed in this player's cup
+    given their current river. Cup card of color C is worth (river_slot_of_C
+    + 1) points if C is in the river, else 0. Hidden cup cards
+    (opp's starting cards) contribute 0 — they're handled by the
+    expected_final_score latent estimate elsewhere.
+
+    Returns an array of shape (N_COLORS,) of point values."""
+    out = np.zeros(_N_COLORS, dtype=np.float32)
+    river_positions: dict[str, int] = {}
+    for i, color in enumerate(player["river"]):
+        if color is not None:
+            river_positions[color] = i
+    for card in player["cup"]:
+        color = card.get("color")
+        if color is None or color == "hidden":
+            continue
+        slot = river_positions.get(color)
+        if slot is None:
+            continue
+        out[_COLOR_IDX[color]] += slot + 1
     return out
 
 
@@ -313,6 +369,44 @@ def encode_view(
     features[cursor] = my_score / score_norm
     features[cursor + 1] = opp_score / score_norm
     cursor += _SCORE_DIM
+
+    # Committed-points-per-color (12 scalars: 6 colors × {me, opp}).
+    # Each scalar = points already committed for that player from cup
+    # cards of that color, given current river. Normalized by 18 (the
+    # max possible: all 18 cards of a colour in cup, river slot 6 → 18*6=108,
+    # but practical max far lower; 18 is a soft cap).
+    me_committed_per_color = committed_points_per_color(me)
+    opp_committed_per_color = committed_points_per_color(opp)  # opp's hidden cup → 0
+    committed_norm = 18.0
+    features[cursor : cursor + _N_COLORS] = me_committed_per_color / committed_norm
+    cursor += _N_COLORS
+    features[cursor : cursor + _N_COLORS] = opp_committed_per_color / committed_norm
+    cursor += _N_COLORS
+
+    # Total committed per player (2 scalars). Net-redundant with above
+    # but explicit aggregates help small MLPs.
+    me_committed_total = float(me_committed_per_color.sum())
+    opp_committed_total = float(opp_committed_per_color.sum())
+    total_norm = 40.0
+    features[cursor + 0] = me_committed_total / total_norm
+    features[cursor + 1] = opp_committed_total / total_norm
+    cursor += _COMMITTED_TOTAL_DIM
+
+    # Score margin (1 scalar): the most game-state-relevant single number.
+    # Includes ALL signal a strong human computes ('I'm ahead by 7'),
+    # mixing committed totals with the latent estimates of unknown cup
+    # cards. Scale: in [-1, 1] roughly.
+    margin = (me_committed_total + my_score - opp_committed_total - opp_score) / total_norm
+    features[cursor] = max(-1.0, min(1.0, margin))
+    cursor += _SCORE_MARGIN_DIM
+
+    # Per-color SEEN counts: how many of each color have I observed
+    # (across all my visible zones combined). Complements residual
+    # (residual = 18 - seen). Net can use either or both for inference
+    # about what's left in opp's hand / deck.
+    seen = visible_total.copy()
+    features[cursor : cursor + _N_COLORS] = seen / CARDS_PER_COLOR
+    cursor += _N_COLORS
 
     # Size scalars (normalized).
     features[cursor + 0] = len(me["hand"]) / MAX_HAND_SIZE

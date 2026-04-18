@@ -34,6 +34,14 @@ class MLPConfig:
     hidden: int = 256  # width of each trunk layer
     n_blocks: int = 4  # number of residual blocks in the trunk
     value_hidden: int = 128  # width of the value head's hidden layer
+    # Optional auxiliary heads. These force the shared trunk to learn
+    # representations that capture information beyond what the value
+    # head extracts on its own. Output is exposed only via
+    # forward_with_aux(); the standard forward() still returns
+    # (policy_logits, value) so existing evaluator/PUCT code is
+    # unaffected.
+    aux_opp_hand: bool = False  # predict opp hand color histogram (6 outputs)
+    aux_opp_hand_bins: int = 9  # bins per color (0..MAX_HAND_SIZE inclusive = 9)
 
 
 class _ResBlock(nn.Module):
@@ -74,19 +82,66 @@ class AlphaZeroMLP(nn.Module):
         self.value_ln = nn.LayerNorm(config.value_hidden)
         self.value_fc2 = nn.Linear(config.value_hidden, 1)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run the net.
+        # Optional opp-hand auxiliary head: predict, for each of 6 colors,
+        # the count of that color in the opponent's hand as a categorical
+        # over `aux_opp_hand_bins` bins (0..MAX_HAND_SIZE). 6 colors ×
+        # bins = output size. Trained with cross-entropy on the actual
+        # count from the engine state during supervised pretraining.
+        if config.aux_opp_hand:
+            from mlfactory.games.mandala.rules import COLORS
 
-        x : (B, feature_dim) float
-        Returns policy_logits (B, n_actions), value (B, 1) in [-1, 1].
-        """
+            self._aux_n_colors = len(COLORS)
+            self.aux_opp_hand_head = nn.Linear(
+                config.hidden, self._aux_n_colors * config.aux_opp_hand_bins
+            )
+        else:
+            self._aux_n_colors = 0
+            self.aux_opp_hand_head = None
+
+    def _trunk(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the shared trunk; returns the (B, hidden) representation
+        that feeds all heads."""
         h = F.relu(self.input_ln(self.input_proj(x)))
         for block in self.blocks:
             h = block(h)
+        return h
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the net (policy + value heads only).
+
+        x : (B, feature_dim) float
+        Returns policy_logits (B, n_actions), value (B, 1) in [-1, 1].
+
+        This signature is unchanged from the pre-aux net so existing
+        evaluator/PUCT code works without modification.
+        """
+        h = self._trunk(x)
         policy_logits = self.policy_head(h)
         v = F.relu(self.value_ln(self.value_fc1(h)))
         value = torch.tanh(self.value_fc2(v))
         return policy_logits, value
+
+    def forward_with_aux(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Run the net with all heads.
+
+        Returns (policy_logits, value, aux_opp_hand_logits).
+        aux_opp_hand_logits has shape (B, n_colors, aux_opp_hand_bins)
+        if aux_opp_hand was enabled in config, else None.
+
+        Used by training code that wants to compute the auxiliary loss.
+        Inference paths use the plain forward() and ignore the aux head.
+        """
+        h = self._trunk(x)
+        policy_logits = self.policy_head(h)
+        v = F.relu(self.value_ln(self.value_fc1(h)))
+        value = torch.tanh(self.value_fc2(v))
+        aux = None
+        if self.aux_opp_hand_head is not None:
+            aux_flat = self.aux_opp_hand_head(h)
+            aux = aux_flat.view(-1, self._aux_n_colors, self.config.aux_opp_hand_bins)
+        return policy_logits, value, aux
 
     # ------------------------------------------------------------------
     # Convenience: parameter count + checkpoint io
