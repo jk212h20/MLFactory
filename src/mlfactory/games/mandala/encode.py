@@ -130,8 +130,14 @@ _SEEN_COUNT_DIM = _N_COLORS  # 6
 # Sizes (normalized to rough ranges) for scalars the net might not derive
 # easily from zone counts:
 #   my_hand_size, opp_hand_size, deck_size, discard_size, my_cup_size,
-#   opp_cup_size, turn_number, end_game_trigger_flag, end_game_trigger_type
-_SIZE_SCALAR_DIM = 9
+#   opp_cup_size, turn_number, end_game_trigger_flag, end_game_trigger_type,
+#   my_cumulative_draws, opp_cumulative_draws
+# The cumulative-draws scalars (last two) are normalized by 50 — a typical
+# game has ~30-50 cards drawn per player. They give the net an explicit
+# signal of "how much has this player's hand been refreshed", which helps
+# opp-hand inference: a player who has barely drawn is still mostly
+# holding cards from their starting deal.
+_SIZE_SCALAR_DIM = 11
 
 # Action history: K entries, each one-hot over N_TEMPLATES + 1 presence bit.
 # To keep the feature vector from exploding, encode each history step as:
@@ -157,20 +163,85 @@ FEATURE_DIM = (
 
 
 # --- History helpers -------------------------------------------------------
+#
+# History is a list of {"template_index": int, "actor_index": int} dicts.
+# Recent K entries are exposed as one-hot template indexes in the encoder.
+#
+# In addition we track CUMULATIVE counters that don't get clipped:
+#   - draws_by_player: list of 2 ints, total cards each player has drawn
+#     since the start of the game (over all build_mountain + discard_redraw
+#     actions). Useful for opp-hand inference: a player who has drawn lots
+#     of cards has a "fresher" hand drawn from more of the residual pool.
+#
+# To keep backward compat with code that treated history as a plain list,
+# we use a list with an optional `_meta` dict attached as an attribute (set
+# via setattr). New code uses `make_history()` / `record_action()` /
+# `history_meta()` rather than touching the structure directly.
 
 
 def make_history() -> list[dict]:
-    """Fresh empty history. Shared across a game's encoding calls."""
-    return []
+    """Fresh empty history with attached cumulative counters."""
+    h: list[dict] = []
+    # Use a list subclass so we can attach attributes; plain `list` doesn't
+    # accept setattr in CPython.
+    h = _HistoryList()
+    h._meta = {"draws_by_player": [0, 0]}
+    return h
+
+
+class _HistoryList(list):
+    """list subclass that accepts attribute attachment for cumulative
+    counters. Functionally identical to list for all consumers."""
+
+    pass
+
+
+def history_meta(history: list[dict] | None) -> dict:
+    """Return cumulative counters attached to a history list, or defaults
+    if absent (backward compat with plain-list histories from older code)."""
+    if history is None:
+        return {"draws_by_player": [0, 0]}
+    meta = getattr(history, "_meta", None)
+    if meta is None:
+        return {"draws_by_player": [0, 0]}
+    return meta
+
+
+def _draws_for_template(template_index: int) -> int:
+    """Number of cards drawn as a side effect of an action of this
+    template kind. Mandala draw rules:
+    - build_mountain: draws up to 3 (we use 3 as the upper bound; actual
+      may be fewer if hand was already at MAX_HAND_SIZE or deck was
+      empty, but for a cumulative-info-leak feature 3 is a fine
+      approximation).
+    - discard_redraw: draws exactly `count` cards.
+    - grow_field, claim_color: no draw.
+    """
+    from mlfactory.games.mandala.actions import index_to_template
+
+    t = index_to_template(template_index)
+    if t.kind == "build_mountain":
+        return 3
+    if t.kind == "discard_redraw":
+        return t.count
+    return 0
 
 
 def record_action(history: list[dict], template_index: int, actor_index: int) -> list[dict]:
     """Append (template_index, actor_index) to history. Returns the updated
-    list (also mutates in place for convenience)."""
+    list (also mutates in place for convenience).
+
+    Also updates cumulative counters attached to the history (see
+    history_meta()). Falls back to plain-list behaviour if the history
+    wasn't created via make_history()."""
     history.append({"template_index": template_index, "actor_index": actor_index})
-    # Clip to HISTORY_K most recent (keep it bounded so features stay stable).
+    # Clip the recent-actions tail (keep last 2*HISTORY_K).
     if len(history) > 2 * HISTORY_K:
         del history[: len(history) - 2 * HISTORY_K]
+    # Update cumulative draws (if this history has the meta dict).
+    meta = getattr(history, "_meta", None)
+    if meta is not None:
+        meta["draws_by_player"][actor_index] += _draws_for_template(template_index)
     return history
 
 
@@ -423,6 +494,15 @@ def encode_view(
         if end_trigger == "sixth_river_color"
         else (0.5 if end_trigger == "deck_exhausted" else 0.0)
     )
+    # Cumulative draws by each player. Helps opp-hand inference: a player
+    # who has barely drawn is mostly still holding their initial deal,
+    # while a player who has drawn many cards has a fresh hand from a
+    # broader sample of the residual pool.
+    meta = history_meta(history)
+    draws = meta["draws_by_player"]
+    draws_norm = 50.0
+    features[cursor + 9] = min(draws[my_player_index] / draws_norm, 1.0)
+    features[cursor + 10] = min(draws[1 - my_player_index] / draws_norm, 1.0)
     cursor += _SIZE_SCALAR_DIM
 
     # History (last HISTORY_K entries, padded left with zeros if fewer).
