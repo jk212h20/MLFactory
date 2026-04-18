@@ -692,6 +692,39 @@ def evaluate_cmd(
     console.print(results_tbl)
 
 
+@app.command("analyze-game")
+def analyze_game_cmd(
+    game: str = typer.Argument(..., help="Game name. Currently supported: 'boop' | 'mandala'."),
+    n_random_games: int = typer.Option(
+        50, help="Random self-play games for branching/length stats."
+    ),
+    n_heuristic_games: int = typer.Option(
+        30, help="Heuristic-vs-random games to measure heuristic strength."
+    ),
+) -> None:
+    """Profile a game's structural dimensions and recommend an ML pipeline.
+
+    Runs the analyzer in `mlfactory.analysis.game_classifier` against the
+    game's probe (in `mlfactory.analysis.probes`) and prints a
+    human-readable report. The recommendation is what the framework
+    chooser will use to set up training (manual for now; automated path
+    coming).
+    """
+    from mlfactory.analysis import classify, pretty_print
+    from mlfactory.analysis.probes import BoopProbe, MandalaProbe
+
+    probes = {"boop": BoopProbe, "mandala": MandalaProbe}
+    if game not in probes:
+        raise typer.BadParameter(f"unknown game '{game}'. Available: {sorted(probes)}")
+    probe = probes[game]()
+    profile = classify(
+        probe,
+        n_random_games=n_random_games,
+        n_heuristic_games=n_heuristic_games,
+    )
+    console.print(pretty_print(profile))
+
+
 @app.command("replay")
 def replay_cmd(
     path: Path = typer.Argument(..., help="Path to a sample-game JSON file."),
