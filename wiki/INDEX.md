@@ -23,6 +23,7 @@ A cross-referenced table of contents for the MLFactory wiki. See [`README.md`](R
 ## Games
 - Boop
   - [[games/boop/rules-summary]] — **stable**. Complete rules with empirical numbers from the 10k-game parity verification.
+  - [[games/boop/status]] — **current**. Training status: champion is `boop-run52-iter15.pt` (promoted 2026-04-17, beat baseline 62.5% / p=0.040). No active training.
 
 ## Trails
 - [[trails/2026-04-getting-mlfactory-off-the-ground]] — the Phase 0 narrative.

@@ -4,7 +4,7 @@
 
 ## Status
 
-**Phase 0: Scaffold & environment.** Repo structure, tooling, environment verification, and a seeded research wiki. No game code or agents yet — those land in Phase 1+.
+Phases 0–3 done. Boop AlphaZero is trained and deployed; current champion is `deploy/checkpoints/boop-run52-iter15.pt` (see [`wiki/games/boop/status`](wiki/games/boop/status.md)). Mandala is the active second-game test of the framework — see `src/mlfactory/games/mandala/` and recent training scripts under `src/mlfactory/training/mandala_*`.
 
 ## What's here
 
@@ -41,7 +41,7 @@ bash scripts/demo-phase0.sh         # the end-to-end phase-0 proof
 | 0 | Scaffold + env verified + wiki seeded | ✅ Done |
 | 1 | Env protocol, Connect 4 (bitboard), vanilla UCT MCTS, colour-balanced arena with ELO | ✅ Done |
 | 2 | Boop rules ported from `Boop/server/src/game/GameState.ts`; 10k-game Python↔TS parity test (zero divergences); D4 symmetry group; tensor encoding; MCTS sign bug discovered+fixed | ✅ Done |
-| 3 | AlphaZero-lite trained on Boop; beats `DeepThinker` (currently 75.6% tournament champion) ≥60% in 100-game match; beats the human (you) in 10-game match | ⏳ Next |
+| 3 | AlphaZero-lite trained on Boop; beats `DeepThinker` (currently 75.6% tournament champion) ≥60% in 100-game match; beats the human (you) in 10-game match | ✅ Done — current champion `deploy/checkpoints/boop-run52-iter15.pt` (run52 early-stopped at iter 15/100, beat baseline 62.5% / p=0.040). See [`wiki/games/boop/status`](wiki/games/boop/status.md). |
 | 4 | Solve / strong evidence of first-player advantage in Boop | ⏳ stretch |
 
 See [`results/`](results/) for phase reports.
