@@ -1,0 +1,17 @@
+# Railway config for the MLFactory Mandala AZ service.
+#
+# Sibling to the project-root /railway.toml (Boop service). To deploy
+# this service on Railway, point the service's "Config-as-Code Path" at
+# `deploy/railway.mandala.toml` (Railway settings → Service → Config).
+# See https://docs.railway.com/guides/config-as-code for full schema.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "deploy/Dockerfile.mandala"
+
+[deploy]
+startCommand = "sh -c 'uvicorn mlfactory.service.mandala_app:app --host 0.0.0.0 --port ${PORT:-8000}'"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

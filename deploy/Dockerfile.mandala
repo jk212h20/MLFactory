@@ -1,0 +1,54 @@
+# Dockerfile for the MLFactory Mandala AZ service (FastAPI).
+#
+# Sibling to ./Dockerfile (which serves the Boop AZ checkpoint). Identical
+# build steps; differs only in:
+#   - AZ_CHECKPOINT default points at the mandala checkpoint
+#   - CMD uvicorns mlfactory.service.mandala_app instead of .app
+#
+# See service/mandala_app.py for endpoints. Wired into mandala-web via
+# AZ_SERVICE_URL on the site server.
+
+FROM python:3.13-slim
+
+# System deps: curl for the healthcheck, ca-certificates for HTTPS.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+# uv from its official multistage image.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Project files first (layer caching for deps).
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+
+# Install: same pinned set as the Boop service for parity. CPU-only torch.
+RUN uv pip install --system --no-cache --python $(which python3) \
+    "torch==2.11.0" "numpy==2.3.4" "rich>=14.2.0" "typer>=0.20.0" \
+    "pyyaml>=6.0.3" "fastapi>=0.120.2" "uvicorn[standard]>=0.44.0" \
+ && uv pip install --system --no-cache --no-deps --python $(which python3) .
+
+# Ship checkpoints into the image. We copy the whole checkpoints/ dir so
+# AZ_CHECKPOINT can be retargeted via env without a rebuild (e.g. when a
+# new mandala checkpoint lands and we want to A/B test it).
+COPY deploy/checkpoints /app/checkpoints
+
+# AZ_CHECKPOINT default: the latest distilled mandala checkpoint that we
+# expect to ship initially. Override at deploy time when newer files land
+# (e.g. mandala-pimc-distill.pt once training completes).
+ENV AZ_CHECKPOINT=/app/checkpoints/mandala-hp-distill-smooth-aux.pt \
+    AZ_DEFAULT_SIMS=200 \
+    AZ_AGENT_MODE=raw_net \
+    PYTHONUNBUFFERED=1 \
+    LOG_LEVEL=INFO
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -f http://127.0.0.1:${PORT:-8000}/health || exit 1
+
+# Railway sets $PORT; fall back to 8000 locally. `--host 0.0.0.0` so the
+# service is reachable on the container's interface.
+CMD ["sh", "-c", "uvicorn mlfactory.service.mandala_app:app --host 0.0.0.0 --port ${PORT:-8000}"]
