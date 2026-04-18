@@ -596,11 +596,17 @@ def active_cmd(
         ps_out = ""
 
     adhoc = []
+    # Detection patterns: any python command running:
+    # - "mlfactory" (module name in -m form, or path containing 'mlfactory')
+    # - a script under MLFactory's repo (scripts/, /tmp/*.py)
+    # We're conservative and skip the typer process running this command.
+    needles = ["mlfactory", "diagnose_hp", "scripts/", "/tmp/"]
     for line in ps_out.splitlines()[1:]:
-        # Skip our own line, ps itself, the typer process, and `grep` matches.
-        if "mlfactory" not in line:
+        if "python" not in line.lower() and "uv run" not in line:
             continue
-        if "ps -Ao" in line or "active_cmd" in line or "/cli.py" in line:
+        if not any(n in line for n in needles):
+            continue
+        if "ps -Ao" in line or "active_cmd" in line:
             continue
         # Skip the typer process running this very command.
         if "mlfactory active" in line or "mlfactory.cli" in line:
@@ -609,7 +615,6 @@ def active_cmd(
         if len(parts) < 3:
             continue
         pid, etime, cmd = parts
-        # Identify the module from the command if possible.
         adhoc.append((pid, etime, cmd))
 
     if not adhoc:
