@@ -534,6 +534,125 @@ def watch_cmd(
     watch_run(layout, refresh_hz=refresh)
 
 
+@app.command("active")
+def active_cmd(
+    log_paths: str = typer.Option(
+        "/tmp/hp-distill*.log,/tmp/eval-*.log,/tmp/hp-vs-rand*.log,/tmp/notify-*.log",
+        help=(
+            "Comma-separated glob patterns to scan for ad-hoc job logs. "
+            "Defaults cover the conventions used by recent ad-hoc scripts."
+        ),
+    ),
+) -> None:
+    """Show ALL active MLFactory work — registered training runs PLUS
+    any ad-hoc detached scripts (eval matches, distillations, etc).
+
+    Two sources:
+      1. Registered training runs under experiments/ (same as
+         `watch-active` searches). Shown with status + alive/dead.
+      2. Python subprocesses currently running an mlfactory.* module,
+         discovered via `ps`. Shown with pid, age, last log line.
+
+    Use this when you've lost track of what's going. Quick snapshot only,
+    not a live TUI; for live updates `tail -f <log>` or `mlfactory watch
+    <run-id>` for registered runs.
+    """
+    import glob
+    import os
+    import subprocess
+    from datetime import datetime
+
+    # ---- Registered training runs ----
+    root = _workspace_root()
+    runs = list_runs(root, game=None)
+    alive_runs = [r for r in runs if run_is_alive(r)]
+    finished_runs = sorted(
+        [r for r in runs if not run_is_alive(r)],
+        key=lambda r: r.run_id,
+        reverse=True,
+    )
+
+    console.print("[bold]Active runs (training, registered):[/bold]")
+    if not alive_runs:
+        console.print("  [dim](none)[/dim]")
+    else:
+        for r in sorted(alive_runs, key=lambda r: r.run_id, reverse=True):
+            pid = r.read_pid()
+            console.print(
+                f"  [green]{r.run_id}[/green]  game={r.game}  pid={pid}  "
+                f"watch: [cyan]mlfactory watch {r.run_id}[/cyan]"
+            )
+
+    # ---- Ad-hoc python subprocesses running mlfactory.* modules ----
+    console.print("\n[bold]Active ad-hoc scripts (mlfactory.*):[/bold]")
+    try:
+        ps_out = subprocess.check_output(
+            ["ps", "-Ao", "pid,etime,command"],
+            text=True,
+            timeout=5,
+        )
+    except Exception as e:  # noqa: BLE001
+        console.print(f"  [red]ps failed: {e}[/red]")
+        ps_out = ""
+
+    adhoc = []
+    for line in ps_out.splitlines()[1:]:
+        # Skip our own line, ps itself, the typer process, and `grep` matches.
+        if "mlfactory" not in line:
+            continue
+        if "ps -Ao" in line or "active_cmd" in line or "/cli.py" in line:
+            continue
+        # Skip the typer process running this very command.
+        if "mlfactory active" in line or "mlfactory.cli" in line:
+            continue
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, etime, cmd = parts
+        # Identify the module from the command if possible.
+        adhoc.append((pid, etime, cmd))
+
+    if not adhoc:
+        console.print("  [dim](none)[/dim]")
+    else:
+        for pid, etime, cmd in adhoc:
+            # Truncate command for display.
+            short = cmd if len(cmd) <= 100 else cmd[:97] + "..."
+            console.print(f"  pid={pid}  age={etime}  cmd=[cyan]{short}[/cyan]")
+
+    # ---- Recently-active log files ----
+    console.print("\n[bold]Recent ad-hoc job logs (most recent first):[/bold]")
+    patterns = [p.strip() for p in log_paths.split(",") if p.strip()]
+    files: list[tuple[float, str]] = []
+    for pat in patterns:
+        for fp in glob.glob(os.path.expanduser(pat)):
+            try:
+                files.append((os.path.getmtime(fp), fp))
+            except OSError:
+                continue
+    files.sort(reverse=True)
+    if not files:
+        console.print("  [dim](no matching log files)[/dim]")
+    else:
+        for mtime, fp in files[:10]:
+            mtstr = datetime.fromtimestamp(mtime).strftime("%H:%M:%S")
+            try:
+                with open(fp, "r") as f:
+                    lines = f.readlines()
+                last = lines[-1].rstrip() if lines else "(empty)"
+            except OSError as e:
+                last = f"(read error: {e})"
+            short_last = last if len(last) <= 80 else last[:77] + "..."
+            console.print(f"  [dim]{mtstr}[/dim]  {fp}  [dim]| {short_last}[/dim]")
+
+    # ---- Most recent finished run, as a hint ----
+    if not alive_runs and finished_runs:
+        console.print(
+            f"\n[dim]most recent finished run: [bold]{finished_runs[0].run_id}[/bold]  "
+            f"status={finished_runs[0].read_status()}[/dim]"
+        )
+
+
 @app.command("watch-active")
 def watch_active_cmd(
     game: str = typer.Option("", help="Optionally filter by game."),
