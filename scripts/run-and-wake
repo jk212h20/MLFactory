@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# run-and-wake: launch a command detached, log it, and poke a chat session
+# on completion (success OR failure). Companion to scripts/notify-on-done
+# (which is for MLFactory training runs that have a status file); this one
+# handles arbitrary ad-hoc work.
+#
+# Usage:
+#   scripts/run-and-wake <log-path> [--session <session-or-substring>] -- <command...>
+#
+# Example:
+#   scripts/run-and-wake /tmp/pimc-vs-hp.log -- uv run python /tmp/pimc_vs_hp.py
+#   scripts/run-and-wake /tmp/eval.log --session "MLFactory conversation review" \
+#       -- uv run python -m mlfactory.training.foo --bar baz
+#
+# After the command exits:
+#   1. Beep + macOS notification.
+#   2. If --session given (or a default is set in env DEFAULT_POKE_SESSION),
+#      send a wake message to that OpenCode session via poke-session.
+#
+# The wake message includes:
+#   - exit status (success/fail)
+#   - elapsed wall time
+#   - last 10 lines of the log
+#
+# Important: this script BACKGROUNDS itself and returns immediately, so the
+# calling shell is not held. Per AGENTS.md R1.
+
+set -u
+
+if [ $# -lt 3 ]; then
+  echo "usage: run-and-wake <log-path> [--session <s>] -- <command...>" >&2
+  exit 2
+fi
+
+log_path=$1
+shift
+
+session=""
+if [ "${1:-}" = "--session" ]; then
+  session=$2
+  shift 2
+fi
+# Default session: if DEFAULT_POKE_SESSION is set in env, use it.
+if [ -z "$session" ]; then
+  session=${DEFAULT_POKE_SESSION:-"MLFactory conversation review"}
+fi
+
+if [ "${1:-}" != "--" ]; then
+  echo "expected '--' separator before command" >&2
+  exit 2
+fi
+shift
+
+# Build the wrapper that runs the command, then on exit pokes the session.
+# macOS mktemp requires the X-template at the END of the filename (no
+# suffix). We use a directory-prefix template; the resulting file has no
+# .sh suffix but bash doesn't care.
+wrapper=$(mktemp /tmp/run-and-wake-XXXXXXXX)
+chmod +x "$wrapper"
+# Quote arguments individually so they survive being passed through the
+# wrapper to the underlying command.
+quoted_cmd=""
+for arg in "$@"; do
+  quoted_cmd="$quoted_cmd $(printf '%q' "$arg")"
+done
+
+cat > "$wrapper" <<EOF
+#!/usr/bin/env bash
+set +e
+start_ts=\$(date +%s)
+$quoted_cmd > "$log_path" 2>&1
+exit_code=\$?
+end_ts=\$(date +%s)
+elapsed=\$(( end_ts - start_ts ))
+
+# Notification
+if command -v osascript >/dev/null 2>&1; then
+  if [ \$exit_code -eq 0 ]; then
+    osascript -e "display notification \"Done in \${elapsed}s\" with title \"$(basename "$log_path")\" sound name \"Glass\"" || true
+  else
+    osascript -e "display notification \"FAILED (exit \$exit_code) in \${elapsed}s\" with title \"$(basename "$log_path")\" sound name \"Sosumi\"" || true
+  fi
+fi
+printf '\\a' >&2 || true
+
+# Build summary message
+summary=\$(tail -n 10 "$log_path" 2>/dev/null || echo "(no log)")
+if [ \$exit_code -eq 0 ]; then
+  msg="ad-hoc job done: $log_path (exit 0, \${elapsed}s)
+
+last 10 lines:
+\$summary"
+else
+  msg="ad-hoc job FAILED: $log_path (exit \$exit_code, \${elapsed}s)
+
+last 10 lines:
+\$summary"
+fi
+
+# Poke session
+if [ -n "$session" ]; then
+  if command -v poke-session >/dev/null 2>&1; then
+    poke-session "$session" "\$msg" >/dev/null 2>&1 || true
+  elif [ -x "\$HOME/bin/poke-session" ]; then
+    "\$HOME/bin/poke-session" "$session" "\$msg" >/dev/null 2>&1 || true
+  fi
+fi
+
+# Cleanup wrapper
+rm -f "$wrapper"
+exit \$exit_code
+EOF
+
+# Launch the wrapper detached.
+nohup "$wrapper" </dev/null >/dev/null 2>&1 &
+pid=$!
+echo "started pid $pid (wrapper $wrapper)"
+echo "log: $log_path"
+echo "session: $session"
